@@ -1,0 +1,8 @@
+{
+  "name": "行测错题本",
+  "description": "一个模仿粉笔风格的智能行测错题管理应用，支持AI识别与手写笔记。",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
