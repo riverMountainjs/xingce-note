@@ -101,7 +101,9 @@ export const analyzeQuestionImage = async (base64Data: string, mimeType: string 
           }
         ],
         response_format: { type: "json_object" },
-        temperature: 0.1
+        temperature: 0.1,
+        enable_search: false, // 禁用搜索
+        thinking: { type: "disabled" } // 正确关闭深度思考
       })
     });
     const apiEnd = performance.now();
@@ -179,7 +181,9 @@ export const analyzeBatchQuestions = async (base64Data: string, mimeType: string
                         ]
                     }
                 ],
-                response_format: { type: "json_object" }
+                response_format: { type: "json_object" },
+                enable_search: false,
+                thinking: { type: "disabled" }
             })
         });
 
@@ -269,16 +273,24 @@ export const analyzeExternalQuestion = async (
             model: DOUBAO_ENDPOINT_ID,
             messages,
             response_format: { type: "json_object" },
-            temperature: 0.3 // 稍微增加一点温度，让语言更自然
+            temperature: 0.3,
+            enable_search: false,
+            thinking: { type: "disabled" }
         })
     });
 
     if (!response.ok) {
-         throw new Error("AI Service Error");
+         const errorText = await response.text();
+         throw new Error(`AI Service Error (${response.status}): ${errorText}`);
     }
 
     const data = await response.json();
-    return JSON.parse(data.choices[0].message.content);
+    try {
+        return JSON.parse(data.choices[0].message.content);
+    } catch (e) {
+        console.error("AI Response Parse Error", data);
+        throw new Error("Failed to parse AI response");
+    }
 };
 
 /**
@@ -320,11 +332,16 @@ export const chatWithQuestion = async (
         body: JSON.stringify({
             model: DOUBAO_ENDPOINT_ID,
             messages,
-            temperature: 0.5
+            temperature: 0.5,
+            enable_search: false,
+            thinking: { type: "disabled" }
         })
     });
 
-    if (!response.ok) throw new Error("Chat Error");
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Chat Error (${response.status}): ${errorText}`);
+    }
     const data = await response.json();
     return { reply: data.choices[0].message.content };
 };
