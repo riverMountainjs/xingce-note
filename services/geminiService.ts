@@ -78,32 +78,38 @@ export const analyzeQuestionImage = async (base64Data: string, mimeType: string 
     
     分类参考指南：${categoryTree}`;
 
+  const requestBody = {
+    model: DOUBAO_ENDPOINT_ID,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          {
+            type: "image_url",
+            image_url: { url: `data:image/jpeg;base64,${compressedBase64}` }
+          }
+        ]
+      }
+    ],
+    response_format: { type: "json_object" },
+    temperature: 0.1,
+    thinking: { type: "disabled" }
+  };
+
   try {
     const apiStart = performance.now();
+    
+    // DEBUG: 打印完整请求体
+    // console.log("[DEBUG] analyzeQuestionImage Body:", JSON.stringify(requestBody, null, 2));
+
     const response = await fetch(ARK_API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model: DOUBAO_ENDPOINT_ID,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
-              {
-                type: "image_url",
-                image_url: { url: `data:image/jpeg;base64,${compressedBase64}` }
-              }
-            ]
-          }
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.1,
-        thinking: { type: "disabled" }
-      })
+      body: JSON.stringify(requestBody)
     });
     const apiEnd = performance.now();
 
@@ -162,6 +168,21 @@ export const analyzeBatchQuestions = async (base64Data: string, mimeType: string
     - tags: 标签数组（**必须是具体考点，不要重复 category 和 subCategory 的名称**）
     `;
 
+    const requestBody = {
+        model: DOUBAO_ENDPOINT_ID,
+        messages: [
+            {
+                role: "user",
+                content: [
+                    { type: "text", text: prompt },
+                    { type: "image_url", image_url: { url: `data:image/jpeg;base64,${compressed}` } }
+                ]
+            }
+        ],
+        response_format: { type: "json_object" },
+        thinking: { type: "disabled" }
+    };
+
     try {
         const response = await fetch(ARK_API_URL, {
             method: "POST",
@@ -169,20 +190,7 @@ export const analyzeBatchQuestions = async (base64Data: string, mimeType: string
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${apiKey}`
             },
-            body: JSON.stringify({
-                model: DOUBAO_ENDPOINT_ID,
-                messages: [
-                    {
-                        role: "user",
-                        content: [
-                            { type: "text", text: prompt },
-                            { type: "image_url", image_url: { url: `data:image/jpeg;base64,${compressed}` } }
-                        ]
-                    }
-                ],
-                response_format: { type: "json_object" },
-                thinking: { type: "disabled" }
-            })
+            body: JSON.stringify(requestBody)
         });
 
         const data = await response.json();
@@ -261,19 +269,25 @@ export const analyzeExternalQuestion = async (
         });
     }
 
+    const requestBody = {
+        model: DOUBAO_ENDPOINT_ID,
+        messages,
+        response_format: { type: "json_object" },
+        temperature: 0.3,
+        thinking: { type: "disabled" }
+    };
+
+    console.log("====== [DEBUG] Plugin Analyze Request Payload ======");
+    console.log(JSON.stringify(requestBody, null, 2));
+    console.log("==================================================");
+
     const response = await fetch(ARK_API_URL, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${apiKey}`
         },
-        body: JSON.stringify({
-            model: DOUBAO_ENDPOINT_ID,
-            messages,
-            response_format: { type: "json_object" },
-            temperature: 0.3,
-            thinking: { type: "disabled" }
-        })
+        body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
@@ -320,18 +334,24 @@ export const chatWithQuestion = async (
         { role: 'user', content: payload.newMessage }
     ];
 
+    const requestBody = {
+        model: DOUBAO_ENDPOINT_ID,
+        messages,
+        temperature: 0.5,
+        thinking: { type: "disabled" }
+    };
+
+    console.log("====== [DEBUG] Chat Request Payload ======");
+    console.log(JSON.stringify(requestBody, null, 2));
+    console.log("========================================");
+
     const response = await fetch(ARK_API_URL, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${apiKey}`
         },
-        body: JSON.stringify({
-            model: DOUBAO_ENDPOINT_ID,
-            messages,
-            temperature: 0.5,
-            thinking: { type: "disabled" }
-        })
+        body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
