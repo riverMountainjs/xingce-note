@@ -100,8 +100,8 @@ export const analyzeQuestionImage = async (base64Data: string, mimeType: string 
   try {
     const apiStart = performance.now();
     
-    // DEBUG: 打印完整请求体
-    // console.log("[DEBUG] analyzeQuestionImage Body:", JSON.stringify(requestBody, null, 2));
+    // WebApp 端调试日志 (F12可见)
+    console.log("[DEBUG] analyzeQuestionImage Body:", requestBody);
 
     const response = await fetch(ARK_API_URL, {
       method: "POST",
@@ -277,9 +277,9 @@ export const analyzeExternalQuestion = async (
         thinking: { type: "disabled" }
     };
 
+    // Server-side Log (Visible in Wrangler Logs)
     console.log("====== [DEBUG] Plugin Analyze Request Payload ======");
     console.log(JSON.stringify(requestBody, null, 2));
-    console.log("==================================================");
 
     const response = await fetch(ARK_API_URL, {
         method: "POST",
@@ -297,7 +297,11 @@ export const analyzeExternalQuestion = async (
 
     const data = await response.json();
     try {
-        return JSON.parse(data.choices[0].message.content);
+        const result = JSON.parse(data.choices[0].message.content);
+        // ★★★ 关键修改：将请求体 requestBody 附带在返回结果中
+        // 这样您在浏览器 Network 面板查看 /api/external/analyze 的 Response 时，
+        // 就能看到 _debug_request_body 字段，无需查看服务器日志。
+        return { ...result, _debug_request_body: requestBody };
     } catch (e) {
         console.error("AI Response Parse Error", data);
         throw new Error("Failed to parse AI response");
@@ -341,10 +345,6 @@ export const chatWithQuestion = async (
         thinking: { type: "disabled" }
     };
 
-    console.log("====== [DEBUG] Chat Request Payload ======");
-    console.log(JSON.stringify(requestBody, null, 2));
-    console.log("========================================");
-
     const response = await fetch(ARK_API_URL, {
         method: "POST",
         headers: {
@@ -359,5 +359,6 @@ export const chatWithQuestion = async (
         throw new Error(`Chat Error (${response.status}): ${errorText}`);
     }
     const data = await response.json();
-    return { reply: data.choices[0].message.content };
+    // 同样附带 Debug 信息
+    return { reply: data.choices[0].message.content, _debug_request_body: requestBody };
 };
