@@ -2,8 +2,8 @@
 import { QuestionCategory } from "../types";
 import { SUB_CATEGORY_MAP } from "../constants";
 
-// 豆包/火山引擎 API 配置
-const ARK_API_URL = "https://api.newcoin.tech/v1/chat/completions";
+// 豆包/火山引擎 API 配置 (官方标准 Endpoint)
+const ARK_API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
 // Flash 模型速度快，配合优化后的 Prompt 和原图上传，能兼顾速度与准确率
 const DOUBAO_ENDPOINT_ID = "doubao-seed-1-6-flash-250828"; 
 
@@ -102,8 +102,7 @@ export const analyzeQuestionImage = async (base64Data: string, mimeType: string 
         ],
         response_format: { type: "json_object" },
         temperature: 0.1,
-        enable_search: false, // 禁用搜索
-        thinking: { type: "disabled" } // 正确关闭深度思考
+        thinking: { type: "disabled" }
       })
     });
     const apiEnd = performance.now();
@@ -182,7 +181,6 @@ export const analyzeBatchQuestions = async (base64Data: string, mimeType: string
                     }
                 ],
                 response_format: { type: "json_object" },
-                enable_search: false,
                 thinking: { type: "disabled" }
             })
         });
@@ -274,7 +272,6 @@ export const analyzeExternalQuestion = async (
             messages,
             response_format: { type: "json_object" },
             temperature: 0.3,
-            enable_search: false,
             thinking: { type: "disabled" }
         })
     });
@@ -333,7 +330,6 @@ export const chatWithQuestion = async (
             model: DOUBAO_ENDPOINT_ID,
             messages,
             temperature: 0.5,
-            enable_search: false,
             thinking: { type: "disabled" }
         })
     });
