@@ -67,10 +67,51 @@ export const onRequest: any = async (context: any) => {
         // Action 3: Save (Direct Save to DB)
         if (action === 'save' && request.method === 'POST') {
             const q = await request.json();
-            // Ensure the question belongs to the authenticated user
-            const lightQ = { ...q, userId: authenticatedUser.id };
             
-            // Check if exists
+            // --- IMAGE EXTRACTION LOGIC (Consistent with Standard POST) ---
+            // Strip large base64 images from JSON to keep D1 'questions' table small and efficient.
+            // Save images to 'question_images' table instead.
+            
+            const imagesToSave: { key: string, data: string }[] = [];
+            const originalMaterials = q.materials || [];
+            
+            // Process Materials Array
+            const lightMaterials = originalMaterials.map((m: string, idx: number) => {
+                // Threshold: 1000 chars (basically any base64 image)
+                if (m && m.length > 1000) { 
+                    imagesToSave.push({ key: `material_${idx}`, data: m });
+                    return '__IMAGE_REF__'; 
+                }
+                return m;
+            });
+
+            // Process Notes Image
+            let lightNotesImage = q.notesImage;
+            if (q.notesImage && q.notesImage.length > 1000) {
+                imagesToSave.push({ key: 'notesImage', data: q.notesImage });
+                lightNotesImage = '__IMAGE_REF__';
+            }
+            
+            // Construct "Light" Question Object (Metadata only)
+            // Ensure userId is forced to the authenticated user from token
+            const lightQ = { 
+                ...q, 
+                materials: lightMaterials, 
+                notesImage: lightNotesImage, 
+                userId: authenticatedUser.id 
+            };
+            
+            // 1. Clean old images (if updating existing question)
+            await env.DB.prepare('DELETE FROM question_images WHERE question_id = ?').bind(q.id).run();
+            
+            // 2. Insert new images
+            if (imagesToSave.length > 0) {
+                const stmt = env.DB.prepare('INSERT INTO question_images (question_id, field_key, image_data, created_at) VALUES (?, ?, ?, ?)');
+                // D1 Batch insert
+                await env.DB.batch(imagesToSave.map(img => stmt.bind(q.id, img.key, img.data, Date.now())));
+            }
+
+            // 3. Upsert Question Metadata
             const exists = await env.DB.prepare('SELECT id FROM questions WHERE id = ?').bind(q.id).first();
             
             if (exists) {

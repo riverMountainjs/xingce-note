@@ -205,7 +205,7 @@ export const analyzeBatchQuestions = async (base64Data: string, mimeType: string
 
 /**
  * [插件专用] 联合分析接口
- * 接收文本数据，返回分类和通俗易懂的解析
+ * 接收文本数据，返回分类信息（不再返回解析，也不返回标签，标签由前端提取）
  */
 export const analyzeExternalQuestion = async (
     payload: { 
@@ -213,8 +213,8 @@ export const analyzeExternalQuestion = async (
         options: string[], 
         materials: string[],
         materialText?: string,
-        userAnswer?: number, // 用户选错的选项索引
-        correctAnswer?: number // 正确选项索引
+        userAnswer?: number, 
+        correctAnswer?: number
     }, 
     apiKeyOverride?: string
 ) => {
@@ -224,62 +224,62 @@ export const analyzeExternalQuestion = async (
         try { apiKey = process.env.API_KEY; } catch (e) {}
     }
 
-    if (!apiKey) throw new Error("API_KEY 未配置");
+    if (!apiKey) throw new Error("API_KEY 未配置，请检查后端环境变量或 .env 配置");
 
-    const categoryTree = Object.entries(SUB_CATEGORY_MAP).map(([cat, subs]) => `${cat}: ${subs.join(", ")}`).join("; ");
+    // INLINED CONSTANT to verify Cloudflare Functions import behavior
+    const LOCAL_SUB_CATEGORY_MAP = {
+      '常识判断': ['政治常识', '法律常识', '经济常识', '人文历史', '科技常识', '地理国情', '管理公文'],
+      '判断推理': ['图形推理', '定义判断', '类比推理', '逻辑判断', '事件排序'],
+      '言语理解': ['逻辑填空', '中心理解', '细节判断', '语句表达', '篇章阅读'],
+      '数量关系': ['数字推理', '数学运算', '工程问题', '行程问题', '经济利润', '几何问题', '排列组合', '最值问题', '和差倍比问题', '概率问题', '不定方程问题', '统筹规划问题', '分段计算问题', '数列问题'],
+      '资料分析': ['文字材料', '表格材料', '图形材料', '综合材料']
+    };
 
-    // 选项字母映射
-    const labels = ['A', 'B', 'C', 'D'];
-    
-    // 构建用户答题情况的描述
-    let userStatus = "";
-    if (payload.userAnswer !== undefined && payload.userAnswer >= 0 && payload.userAnswer <= 3) {
-        if (payload.correctAnswer !== undefined && payload.userAnswer === payload.correctAnswer) {
-             userStatus = "用户做对了这道题。";
-        } else {
-             userStatus = `用户错选了：${labels[payload.userAnswer]}。请分析为什么用户会选这个选项（错误原因）。`;
-        }
-    } else {
-        userStatus = "请给出完整的解析。";
-    }
+    const categoryTree = Object.entries(LOCAL_SUB_CATEGORY_MAP).map(([cat, subs]) => `${cat}: ${subs.join(", ")}`).join("; ");
 
-    const prompt = `你是一位经验丰富、说话通俗易懂的公考行测 AI 助手。
+    // 修改提示词：明确不需要解析，不需要Tags（前端已提供）
+    const prompt = `你是一位专业的公考行测数据整理助手。
     
     题目信息:
     题干: ${payload.stem}
     选项: ${payload.options.join(' | ')}
     ${payload.materialText ? `材料文本: ${payload.materialText}` : ''}
-    ${userStatus}
+    
+    你的唯一任务是提取题目的分类以方便归档。
     
     请严格返回 JSON 格式:
     {
       "category": "必须选自 [常识判断, 判断推理, 言语理解, 数量关系, 资料分析]",
-      "subCategory": "子类，参考: ${categoryTree}",
-      "miniAnalysis": "解析内容。请用HTML格式（使用 <p>, <b>, <span> 颜色等标签美化）。\n要求：\n1. 风格通俗易懂，详略得当，不要堆砌术语。\n2. **重点分析**：为什么正确选项是对的？思路是什么？\n3. **针对性**：${userStatus.includes('做对') ? '用户做对了，重点总结该题型的秒杀技巧或核心公式，不需要纠错。' : '用户做错了，请详细解释错误选项的陷阱在哪里，以及如何避免。'}\n4. 对于明显凑数的错误选项，一笔带过即可。"
+      "subCategory": "子类，参考: ${categoryTree}"
     }`;
 
-    const messages: any[] = [{ role: "user", content: [{ type: "text", text: prompt }] }];
-    
+    // 【关键修复】根据是否有图片动态构造 messages 结构
+    // 某些模型在接收不含 image_url 的 content 数组时可能报错，因此无图时使用纯字符串格式
+    let messages: any[] = [];
+
     if (payload.materials && payload.materials.length > 0) {
-        // Limit to first 3 images to avoid payload issues
-        const mats = payload.materials.slice(0, 3);
+        const contentParts: any[] = [{ type: "text", text: prompt }];
+        // Limit to first 2 images to avoid payload issues
+        const mats = payload.materials.slice(0, 2);
         mats.forEach(mat => {
              const imgUrl = mat.startsWith('http') ? mat : (mat.startsWith('data:') ? mat : `data:image/jpeg;base64,${mat}`);
-             messages[0].content.push({ type: "image_url", image_url: { url: imgUrl } });
+             contentParts.push({ type: "image_url", image_url: { url: imgUrl } });
         });
+        messages = [{ role: "user", content: contentParts }];
+    } else {
+        // 无图模式：直接发送字符串 content
+        messages = [{ role: "user", content: prompt }];
     }
 
     const requestBody = {
         model: DOUBAO_ENDPOINT_ID,
         messages,
         response_format: { type: "json_object" },
-        temperature: 0.3,
+        temperature: 0.1, // 分类任务使用低温度
         thinking: { type: "disabled" }
     };
 
-    // Server-side Log (Visible in Wrangler Logs)
-    console.log("====== [DEBUG] Plugin Analyze Request Payload ======");
-    console.log(JSON.stringify(requestBody, null, 2));
+    console.log("====== [DEBUG] Plugin Classification Request ======");
 
     const response = await fetch(ARK_API_URL, {
         method: "POST",
@@ -292,15 +292,13 @@ export const analyzeExternalQuestion = async (
 
     if (!response.ok) {
          const errorText = await response.text();
+         console.error("AI API Error:", errorText);
          throw new Error(`AI Service Error (${response.status}): ${errorText}`);
     }
 
     const data = await response.json();
     try {
         const result = JSON.parse(data.choices[0].message.content);
-        // ★★★ 关键修改：将请求体 requestBody 附带在返回结果中
-        // 这样您在浏览器 Network 面板查看 /api/external/analyze 的 Response 时，
-        // 就能看到 _debug_request_body 字段，无需查看服务器日志。
         return { ...result, _debug_request_body: requestBody };
     } catch (e) {
         console.error("AI Response Parse Error", data);
@@ -329,8 +327,8 @@ export const chatWithQuestion = async (
     题干：${payload.stem}
     选项：${payload.options.join(' | ')}
     
-    请解答用户的疑问。回答要简练、直接、切中要害。
-    可以使用Markdown语法，例如用 **粗体** 强调重点。`;
+    学生提出了问题，请直接回答。回答要简练、直接、切中要害。
+    `;
 
     const messages = [
         { role: 'system', content: systemPrompt },
@@ -344,6 +342,9 @@ export const chatWithQuestion = async (
         temperature: 0.5,
         thinking: { type: "disabled" }
     };
+
+    // DEBUG: Log request for server-side debugging
+    console.log("[DEBUG] Chat Request:", JSON.stringify(requestBody));
 
     const response = await fetch(ARK_API_URL, {
         method: "POST",
@@ -359,6 +360,13 @@ export const chatWithQuestion = async (
         throw new Error(`Chat Error (${response.status}): ${errorText}`);
     }
     const data = await response.json();
-    // 同样附带 Debug 信息
-    return { reply: data.choices[0].message.content, _debug_request_body: requestBody };
+
+    // DEBUG: Log response for server-side debugging
+    console.log("[DEBUG] Chat Response:", JSON.stringify(data));
+
+    return { 
+        reply: data.choices[0].message.content, 
+        _debug_request: requestBody, // Return request for client-side debugging
+        _debug_response: data        // Return raw response for client-side debugging
+    };
 };

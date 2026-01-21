@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { Bold, Italic, List, ListOrdered, Image as ImageIcon, Loader2, Indent, Outdent, Palette, Trash2, Type } from 'lucide-react';
 
@@ -112,7 +113,7 @@ const RichTextEditor: React.FC<RichTextEditorProps> = ({ value, onChange, placeh
         setIsProcessingImg(true);
         try {
             const compressedBase64 = await compressImage(file);
-            const imgHtml = `<img src="${compressedBase64}" loading="lazy" class="max-w-full h-auto rounded-lg my-2 border border-gray-100 shadow-sm" />&nbsp;`;
+            const imgHtml = `<img src="${compressedBase64}" loading="lazy" class="rich-img-inline" />`;
             editorRef.current?.focus();
             document.execCommand('insertHTML', false, imgHtml);
             handleInput();
@@ -188,14 +189,26 @@ const RichTextEditor: React.FC<RichTextEditorProps> = ({ value, onChange, placeh
             <style>{`
                 .rich-editor-content { 
                     font-family: ui-sans-serif, system-ui, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", sans-serif;
-                    line-height: 1.75;
-                    font-size: 16px; /* Base font size increased */
+                    font-size: 16px; 
                     color: #334155;
+                    line-height: 1.5;
                 }
-                .rich-editor-content ul { list-style-type: disc; padding-left: 1.5rem; margin: 0.5rem 0; }
-                .rich-editor-content ol { list-style-type: decimal; padding-left: 1.5rem; margin: 0.5rem 0; }
-                .rich-editor-content li { margin-bottom: 0.25rem; }
-                /* Fix for placeholder when font is larger */
+                /* 修复：将段落间距设为0，减少空白 */
+                .rich-editor-content p, .rich-editor-content div { 
+                    margin: 0; 
+                    padding: 1px 0;
+                }
+                /* 修复：强制图片行内显示，并垂直居中 */
+                .rich-editor-content img, .rich-img-inline { 
+                    display: inline-block !important; 
+                    vertical-align: middle !important;
+                    margin: 0 2px;
+                    max-width: 100%;
+                    border-radius: 4px;
+                }
+                .rich-editor-content ul { list-style-type: disc; padding-left: 1.5rem; margin: 0.25rem 0; }
+                .rich-editor-content ol { list-style-type: decimal; padding-left: 1.5rem; margin: 0.25rem 0; }
+                .rich-editor-content li { margin-bottom: 0.1rem; }
                 .rich-editor-placeholder {
                     font-size: 16px;
                 }
@@ -204,7 +217,7 @@ const RichTextEditor: React.FC<RichTextEditorProps> = ({ value, onChange, placeh
             <div className="relative flex-1 flex flex-col min-h-[250px]">
                 <div 
                     ref={editorRef}
-                    className="flex-1 p-4 outline-none prose max-w-none overflow-y-auto rich-editor-content"
+                    className="flex-1 p-4 outline-none overflow-y-auto rich-editor-content"
                     contentEditable
                     onInput={handleInput}
                     onCompositionStart={() => isComposing.current = true}

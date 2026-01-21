@@ -1,4 +1,5 @@
 
+
 import { Question, User, PracticeSession, QuestionCategory } from "../types";
 
 // --- CONFIGURATION ---
@@ -13,7 +14,7 @@ const KEYS = {
 
 // --- INDEXED DB HELPER ---
 const DB_NAME = 'XingCeDB';
-const DB_VERSION = 3; // Bump version for robust image store handling
+const DB_VERSION = 3; 
 
 const idb = {
     db: null as IDBDatabase | null,
@@ -99,7 +100,6 @@ const idb = {
                     completed++;
                     if(completed === keys.length) resolve();
                 };
-                // Handle errors silently for individual deletions
                 store.delete(key).onerror = () => {
                     completed++;
                     if(completed === keys.length) resolve();
@@ -107,15 +107,13 @@ const idb = {
             });
         });
     },
-    // Helper to find all keys starting with prefix (for cleaning up RTE images)
     async getKeysStartingWith(prefix: string): Promise<string[]> {
         const db = await this.init();
         return new Promise((resolve) => {
             const keys: string[] = [];
             const transaction = db.transaction('images', 'readonly');
             const store = transaction.objectStore('images');
-            // Using a cursor is the most compatible way
-            const request = store.openCursor(); // Could optimize with key range if index existed, but this is okay for local
+            const request = store.openCursor(); 
             request.onsuccess = (e) => {
                 const cursor = (e.target as IDBRequest).result as IDBCursorWithValue;
                 if (cursor) {
@@ -133,12 +131,11 @@ const idb = {
     }
 };
 
-// --- RICH TEXT HELPERS ---
-const processNoteTextForSave = async (html: string, questionId: string): Promise<string> => {
+// --- RICH TEXT HELPERS (Refactored for generic usage) ---
+const processHtmlForSave = async (html: string, questionId: string, prefix: string): Promise<string> => {
     if (!html) return '';
     
     // Regex to find base64 images: <img ... src="data:image/..." ...>
-    // We replace the src with a marker
     const imgRegex = /<img([^>]+)src=["'](data:image\/[^;]+;base64,[^"']+)["']([^>]*)>/g;
     
     let processedHtml = html;
@@ -150,13 +147,15 @@ const processNoteTextForSave = async (html: string, questionId: string): Promise
         const srcData = matches[i][2];
         const afterSrc = matches[i][3];
         
-        const key = `${questionId}_rte_${Date.now()}_${i}`;
+        // Unique key: {id}_{prefix}_{timestamp}_{index}
+        // prefix can be 'rte' or 'analysis'
+        const key = `${questionId}_${prefix}_${Date.now()}_${i}`;
         
         // Save to IDB
         await idb.put('images', { key, data: srcData });
         
         // Replace in HTML with a special marker protocol
-        const newSrc = `__RTE_REF__${key}`;
+        const newSrc = `__${prefix.toUpperCase()}_REF__${key}`;
         const newTag = `<img${beforeSrc}src="${newSrc}"${afterSrc}>`;
         processedHtml = processedHtml.replace(fullTag, newTag);
     }
@@ -164,13 +163,14 @@ const processNoteTextForSave = async (html: string, questionId: string): Promise
     return processedHtml;
 };
 
-const restoreNoteTextImages = async (html: string): Promise<string> => {
-    if (!html || !html.includes('__RTE_REF__')) return html;
+const restoreHtmlImages = async (html: string, prefix: string): Promise<string> => {
+    const marker = `__${prefix.toUpperCase()}_REF__`;
+    if (!html || !html.includes(marker)) return html;
     
-    const refRegex = /__RTE_REF__([a-zA-Z0-9_]+)/g;
+    // Regex: __PREFIX_REF__key
+    const refRegex = new RegExp(`${marker}([a-zA-Z0-9_]+)`, 'g');
     const matches = Array.from(html.matchAll(refRegex));
     
-    // De-duplicate keys to avoid fetching same image multiple times
     const uniqueKeys = [...new Set(matches.map(m => m[1]))];
     
     const imageMap: Record<string, string> = {};
@@ -186,7 +186,7 @@ const restoreNoteTextImages = async (html: string): Promise<string> => {
     
     let restoredHtml = html;
     matches.forEach(m => {
-        const fullRef = m[0]; // __RTE_REF__key
+        const fullRef = m[0]; 
         const key = m[1];
         if (imageMap[key]) {
             restoredHtml = restoredHtml.replace(fullRef, imageMap[key]);
@@ -284,18 +284,20 @@ const LocalAdapter: StorageAdapter = {
   },
   async getQuestions(userId) {
     await migrateFromLocalStorage(userId);
-    // This now returns questions with LIGHTWEIGHT metadata (images stripped)
     const questions = await idb.getAll<Question & { userId: string }>('questions', userId);
     return questions.sort((a, b) => b.createdAt - a.createdAt);
   },
   async saveQuestion(userId, q) {
-      // 1. Process Rich Text Notes - Extract images
-      const processedNoteText = await processNoteTextForSave(q.noteText || '', q.id);
+      // 1. Process Rich Text Notes
+      const processedNoteText = await processHtmlForSave(q.noteText || '', q.id, 'rte');
 
-      // 2. Prepare Light Object
-      const lightQ = { ...q, userId, noteText: processedNoteText };
+      // 2. Process Analysis Text (New)
+      const processedAnalysis = await processHtmlForSave(q.analysis || '', q.id, 'analysis');
+
+      // 3. Prepare Light Object
+      const lightQ = { ...q, userId, noteText: processedNoteText, analysis: processedAnalysis };
       
-      // 3. Handle Materials (Strip large base64)
+      // 4. Handle Materials
       const materialsRef: string[] = [];
       if (q.materials) {
           for (let i = 0; i < q.materials.length; i++) {
@@ -311,28 +313,26 @@ const LocalAdapter: StorageAdapter = {
       }
       lightQ.materials = materialsRef;
 
-      // 4. Handle Notes Image (Strip large base64)
+      // 5. Handle Notes Image
       if (q.notesImage && q.notesImage.length > 500) {
           const key = `${q.id}_note`;
           await idb.put('images', { key, data: q.notesImage });
           lightQ.notesImage = '__IMAGE_REF__';
       }
 
-      // 5. Save Light Object
       await idb.put('questions', lightQ);
   },
   async deleteQuestion(userId, qId, hard = false) {
       if (hard) {
           await idb.delete('questions', qId);
           
-          // Cleanup standard images
           const keysToDelete = [`${qId}_note`];
-          for(let i=0; i<20; i++) keysToDelete.push(`${qId}_mat_${i}`); // Assume max 20 materials
+          for(let i=0; i<20; i++) keysToDelete.push(`${qId}_mat_${i}`);
           
-          // Cleanup Rich Text images
           const rteKeys = await idb.getKeysStartingWith(`${qId}_rte_`);
+          const analysisKeys = await idb.getKeysStartingWith(`${qId}_analysis_`);
           
-          await idb.deleteMultipleImages([...keysToDelete, ...rteKeys]);
+          await idb.deleteMultipleImages([...keysToDelete, ...rteKeys, ...analysisKeys]);
       } else {
           const q = await idb.get<Question>('questions', qId);
           if (q) {
@@ -346,16 +346,12 @@ const LocalAdapter: StorageAdapter = {
     return sessions.sort((a, b) => b.date - a.date);
   },
   async saveSession(userId, session, skipStatsUpdate = false) {
-    // 1. Save the session itself
     await idb.put('sessions', { ...session, userId });
     
-    // 2. Optimized Batch Update for Question Stats (Parallelized)
     if (!skipStatsUpdate) {
-        // Fetch all relevant questions in parallel first
         const questionIds = session.details.map(d => d.questionId);
         const questions = await Promise.all(questionIds.map(id => idb.get<Question>('questions', id)));
 
-        // Update objects in memory
         const updates: Promise<void>[] = [];
         for (let i = 0; i < questions.length; i++) {
             const q = questions[i];
@@ -367,8 +363,6 @@ const LocalAdapter: StorageAdapter = {
                 updates.push(idb.put('questions', q));
             }
         }
-        
-        // Execute all writes in parallel
         await Promise.all(updates);
     }
   },
@@ -402,7 +396,12 @@ const LocalAdapter: StorageAdapter = {
 
       // Hydrate Rich Text Notes
       if (q.noteText && q.noteText.includes('__RTE_REF__')) {
-          q.noteText = await restoreNoteTextImages(q.noteText);
+          q.noteText = await restoreHtmlImages(q.noteText, 'rte');
+      }
+
+      // Hydrate Analysis Text (New)
+      if (q.analysis && q.analysis.includes('__ANALYSIS_REF__')) {
+          q.analysis = await restoreHtmlImages(q.analysis, 'analysis');
       }
       
       return q;
@@ -437,10 +436,6 @@ const CloudAdapter: StorageAdapter = {
     return res.ok ? await res.json() : [];
   },
   async saveSession(userId, session, skipStatsUpdate = false) {
-    // IMPORTANT OPTIMIZATION:
-    // We do NOT update questions one-by-one here anymore for Cloud.
-    // The backend API handles the batch update of question stats (mistakeCount/correctCount)
-    // when receiving the POST /sessions request. This reduces N+1 requests to 1 request.
     await fetch('/api/sessions', { 
         method: 'POST', 
         headers: { 'Content-Type': 'application/json', 'X-User-Id': userId }, 
@@ -451,7 +446,6 @@ const CloudAdapter: StorageAdapter = {
     await fetch(`/api/sessions/${sId}`, { method: 'DELETE', headers: { 'X-User-Id': userId } });
   },
   async hydrateQuestionImages(userId, question) {
-      // Basic cloud hydration for materials logic
       const hasPlaceholder = question.materials.some(m => m === '__IMAGE_REF__') || question.notesImage === '__IMAGE_REF__';
       if (!hasPlaceholder) return question;
       try {
@@ -563,15 +557,11 @@ export const restoreBackup = async (data: any) => {
 };
 
 export const getStats = async () => {
-    const allQuestions = await getQuestions(); // This fetches and sorts
+    const allQuestions = await getQuestions(); 
     const sessions = await getSessions();
 
-    // Optimize: Use timestamp math instead of Date parsing loop
-    // Beijing is UTC+8
     const OFFSET = 8 * 60 * 60 * 1000;
     const DAY_MS = 24 * 60 * 60 * 1000;
-
-    // Helper to get day identifier (number of days since epoch shifted by timezone)
     const getDayId = (ts: number) => Math.floor((ts + OFFSET) / DAY_MS);
 
     const now = Date.now();
@@ -579,17 +569,14 @@ export const getStats = async () => {
 
     let total = 0;
     let masteredCount = 0;
-    
     let todayMistakes = 0;
     let yesterdayMistakes = 0;
     let weekMistakes = 0;
     let monthMistakes = 0;
     
-    // Initialize category counts
     const byCategory: any = {};
     Object.values(QuestionCategory).forEach(cat => byCategory[cat] = 0);
 
-    // Single pass loop over all questions
     for (const q of allQuestions) {
         if (q.deletedAt) continue;
         

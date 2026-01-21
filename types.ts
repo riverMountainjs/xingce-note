@@ -1,4 +1,5 @@
 
+
 export enum QuestionCategory {
   COMMON_SENSE = '常识判断',
   LOGIC = '判断推理',
@@ -32,6 +33,7 @@ export interface Question {
   tags?: string[];      
   notesImage?: string; 
   noteText?: string;   
+  analysis?: string; // Added: Official analysis/explanation
   lastPracticedAt?: number;
   mistakeCount: number;
   correctCount?: number; 

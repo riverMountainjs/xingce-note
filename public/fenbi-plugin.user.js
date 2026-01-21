@@ -2,8 +2,8 @@
 // ==UserScript==
 // @name         行测错题本智能助手 (粉笔专用)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
-// @description  AI 原地辅助录入：一键识别分类、AI 助手解析（支持追问）、原地写笔记、异步静默同步到错题本。
+// @version      10.7
+// @description  AI 原地辅助录入：自动分类提取、AI 对话助手（支持追问）、可缩放富文本笔记、异步静默同步到错题本。
 // @author       You
 // @match        *://*.fenbi.com/*
 // @grant        GM_xmlhttpRequest
@@ -18,293 +18,188 @@
     // 全局变量与配置
     // ==========================================
     
-    // 缓存：Key=题目DOM节点, Value={stem, aiResult, chatHistory}
+    // 缓存：Key=题目DOM节点, Value={stem, aiResult, chatHistory, userNoteValue, qData}
     var fbPanelCache = new WeakMap();
     
     // 全局面板单例引用
     var globalPanel = null;
-    var currentActiveContainer = null; // 当前正在展示的题目容器
+    var currentActiveContainer = null; 
+    
+    // 自动关闭的定时器
+    var autoCloseTimer = null;
 
     const CONFIG = {
-        SERVER_URL: GM_getValue('server_url', 'https://xingce-note.pages.dev'), 
-        EXTERNAL_TOKEN: GM_getValue('external_token', ''),
+       SERVER_URL: GM_getValue('server_url', 'https://notebookv3.pages.dev'),
+        EXTERNAL_TOKEN: GM_getValue('external_token', 'a192eaa1-aa13-44e8-ad71-7a2b91061ea9'),
+    };
+
+    // 分类映射表
+    const SUB_CATEGORY_MAP = {
+      '常识判断': ['政治常识', '法律常识', '经济常识', '人文历史', '科技常识', '地理国情', '管理公文'],
+      '判断推理': ['图形推理', '定义判断', '类比推理', '逻辑判断', '事件排序'],
+      '言语理解': ['逻辑填空', '中心理解', '细节判断', '语句表达', '篇章阅读'],
+      '数量关系': ['数字推理', '数学运算', '工程问题', '行程问题', '经济利润', '几何问题', '排列组合', '最值问题', '和差倍比问题', '概率问题', '不定方程问题', '统筹规划问题', '分段计算问题', '数列问题'],
+      '资料分析': ['文字材料', '表格材料', '图形材料', '综合材料']
     };
 
     const STYLES = `
         /* 按钮样式 */
-        .fb-plugin-btn-li {
-            display: flex;
-            align-items: center;
-            margin-left: 10px;
-            cursor: pointer;
-            position: relative;
-            z-index: 999;
-        }
-        .fb-plugin-btn {
-            display: flex;
-            align-items: center;
-            padding: 4px 10px;
-            background: #f0f9ff;
-            color: #3b82f6;
-            border: 1px solid #bfdbfe;
-            border-radius: 14px;
-            font-size: 12px;
-            font-weight: 600;
-            transition: all 0.2s;
-            cursor: pointer;
-            pointer-events: auto;
-            user-select: none;
-            outline: none;
-        }
+        .fb-plugin-btn-li { display: inline-flex; align-items: center; margin-left: 10px; cursor: pointer; position: relative; z-index: 999; vertical-align: middle; }
+        .fb-plugin-btn { display: inline-flex; align-items: center; padding: 4px 10px; background: #f0f9ff; color: #3b82f6; border: 1px solid #bfdbfe; border-radius: 14px; font-size: 12px; font-weight: 600; transition: all 0.2s; cursor: pointer; pointer-events: auto; user-select: none; outline: none; line-height: 1.5; white-space: nowrap; }
         .fb-plugin-btn:hover { background: #3b82f6; color: white; border-color: #3b82f6; }
         .fb-plugin-btn:active { transform: translateY(1px); }
+        .fb-plugin-btn.done { background: #dcfce7; color: #166534; border-color: #86efac; }
         
         /* 全局悬浮面板 */
         .fb-smart-panel {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            position: fixed; /* 固定定位，防止被父元素遮挡 */
-            top: 80px; 
-            right: 40px; 
-            width: 450px; 
-            height: 70vh;
-            min-width: 380px;
-            min-height: 400px;
-            max-width: 90vw;
-            max-height: 90vh;
-            background: rgba(255, 255, 255, 0.98);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-radius: 16px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.25);
-            z-index: 2147483647; /* 最高层级 */
-            padding: 20px;
-            box-sizing: border-box;
-            display: flex;
-            flex-direction: column;
-            resize: both; /* 允许拖拽调整大小 */
-            overflow: hidden; /* 配合resize */
-            transition: opacity 0.2s, transform 0.2s;
-            opacity: 0;
-            pointer-events: none;
-            transform: scale(0.95);
+            position: fixed; top: 60px; right: 40px; width: 33vw; min-width: 420px; max-width: 1200px; height: 85vh; min-height: 600px; max-height: 95vh;
+            background: #ffffff; border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+            z-index: 2147483647; padding: 24px; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; 
+            opacity: 0; visibility: hidden; transform: scale(0.98) translateX(20px); transition: opacity 0.2s ease-out, transform 0.2s ease-out, visibility 0s linear 0.2s; pointer-events: none; 
         }
+        .fb-smart-panel.active { visibility: visible; opacity: 1; transform: scale(1) translateX(0); pointer-events: auto; transition: opacity 0.2s ease-out, transform 0.2s ease-out, visibility 0s linear 0s; }
 
-        .fb-smart-panel.active {
-            opacity: 1;
-            pointer-events: auto;
-            transform: scale(1);
-        }
-
-        /* 顶部拖拽区 (可选) */
-        .fb-panel-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 12px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid #f1f5f9;
-            cursor: move; /* 暗示可拖动位置，虽然这里是固定定位 */
-            flex-shrink: 0;
-        }
+        /* 通用UI组件 */
+        .fb-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #f1f5f9; flex-shrink: 0; user-select: none; }
         .fb-panel-header h4 { margin: 0; font-size: 16px; font-weight: 800; color: #1e293b; }
         
-        .fb-badge {
+        .fb-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; background: #eff6ff; color: #3b82f6; margin-right: 6px; border: 1px solid #dbeafe; cursor: default; margin-bottom: 4px; }
+        .fb-badge .remove-tag { margin-left: 4px; cursor: pointer; opacity: 0.6; font-size: 14px; line-height: 1; }
+        .fb-badge .remove-tag:hover { opacity: 1; color: #ef4444; }
+        
+        .fb-select { display: inline-block; padding: 2px 4px; border-radius: 4px; font-size: 12px; font-weight: 600; background: #eff6ff; color: #1d4ed8; margin-right: 6px; border: 1px solid #dbeafe; outline: none; cursor: pointer; height: 24px; }
+        
+        .fb-scroll-area { flex: 1; overflow: hidden; display: flex; flex-direction: column; position: relative; }
+        .fb-section { border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; background: #fff; display: flex; flex-direction: column; overflow: hidden; }
+        .fb-splitter { height: 10px; width: 100%; cursor: row-resize; background: transparent; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin: 2px 0; z-index: 10; }
+        .fb-splitter:hover { background: #f1f5f9; }
+        .fb-splitter::after { content: ""; display: block; width: 40px; height: 4px; background: #cbd5e1; border-radius: 2px; }
+
+        /* Markdown & Chat */
+        .fb-md-content { font-size: 14px; line-height: 1.6; color: #334155; }
+        .fb-md-content p { margin: 0 0 8px 0; text-align: justify; }
+        .fb-md-content ul, .fb-md-content ol { margin: 4px 0 8px 0; padding-left: 20px; }
+        .fb-md-content li { margin-bottom: 4px; }
+        .fb-md-content strong { font-weight: 700; color: #0f172a; }
+        .fb-md-content code { background: #f1f5f9; padding: 2px 4px; border-radius: 4px; font-family: monospace; font-size: 0.9em; color: #d63384; }
+        .fb-md-content pre { background: #f8fafc; padding: 8px; border-radius: 6px; overflow-x: auto; border: 1px solid #e2e8f0; }
+        
+        .fb-chat-section { flex: none; height: 75%; min-height: 150px; }
+        .fb-chat-msgs { flex: 1; overflow-y: auto; margin-bottom: 12px; padding-right: 6px; scroll-behavior: smooth; }
+        .fb-chat-msg { margin-bottom: 12px; padding: 10px 14px; border-radius: 12px; max-width: 95%; word-wrap: break-word; font-size: 14px; line-height: 1.6; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+        .fb-chat-msg.user { background: #eff6ff; color: #1e40af; align-self: flex-end; margin-left: auto; border-bottom-right-radius: 2px; border: 1px solid #dbeafe; }
+        .fb-chat-msg.ai { background: #ffffff; border: 1px solid #e2e8f0; align-self: flex-start; margin-right: auto; border-bottom-left-radius: 2px; }
+        
+        /* 光标特效 */
+        .cursor {
             display: inline-block;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 600;
-            background: #eff6ff;
-            color: #3b82f6;
-            margin-right: 4px;
-            border: 1px solid #dbeafe;
+            width: 2px;
+            height: 1em;
+            background-color: #3b82f6;
+            vertical-align: text-bottom;
+            animation: blink 1s infinite;
         }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 
-        /* 滚动区域 */
-        .fb-scroll-area {
-            flex: 1;
-            overflow-y: auto;
-            padding-right: 4px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
+        /* 思考中动效 */
+        .thinking-dots::after {
+            content: '.';
+            animation: dots 1.5s steps(5, end) infinite;
         }
+        @keyframes dots { 0%, 20% { content: '.'; } 40% { content: '..'; } 60% { content: '...'; } 80%, 100% { content: ''; } }
 
-        .fb-ai-content {
-            background: #f8fafc;
-            border-radius: 8px;
-            padding: 12px;
-            font-size: 14px;
-            color: #334155;
-            border: 1px solid #e2e8f0;
-            line-height: 1.6;
-        }
-        .fb-ai-content p { margin: 0 0 8px 0; }
-        .fb-ai-content strong { color: #0f172a; font-weight: 700; }
+        .fb-suggestions { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 8px; scrollbar-width: none; flex-shrink: 0; }
+        .fb-chip { white-space: nowrap; background: #f0f9ff; color: #0284c7; border: 1px solid #bae6fd; padding: 6px 12px; border-radius: 16px; font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.2s; flex-shrink: 0; }
+        .fb-chip:hover { background: #0284c7; color: white; border-color: #0284c7; }
         
-        /* 聊天区域 */
-        .fb-chat-section {
-            background: #fff;
-            border: 1px solid #f1f5f9;
-            border-radius: 8px;
-            padding: 10px;
-            display: flex;
-            flex-direction: column;
-        }
-        .fb-chat-msgs {
-            max-height: 180px;
-            overflow-y: auto;
-            margin-bottom: 8px;
-            font-size: 13px;
-            padding-right: 4px;
-        }
-        .fb-chat-msg {
-            margin-bottom: 8px;
-            padding: 6px 10px;
-            border-radius: 6px;
-            max-width: 92%;
-            word-wrap: break-word;
-            line-height: 1.4;
-        }
-        .fb-chat-msg.user {
-            background: #eff6ff;
-            color: #1e40af;
-            align-self: flex-end;
-            margin-left: auto;
-            border-bottom-right-radius: 2px;
-        }
-        .fb-chat-msg.ai {
-            background: #f1f5f9;
-            color: #334155;
-            align-self: flex-start;
-            margin-right: auto;
-            border-bottom-left-radius: 2px;
-        }
-        
-        .fb-chat-input-box {
-            display: flex;
-            gap: 6px;
-            align-items: flex-end;
-        }
-        .fb-chat-input {
-            flex: 1;
-            border: 1px solid #e2e8f0;
-            border-radius: 6px;
-            padding: 6px 8px;
-            font-size: 13px;
-            outline: none;
-            transition: all 0.2s;
-            resize: none; 
-            height: 36px;
-            min-height: 36px;
-            max-height: 72px;
-            font-family: inherit;
-        }
-        .fb-chat-input:focus { border-color: #3b82f6; background: #fff; }
+        .fb-chat-input-box { display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0; }
+        .fb-chat-input { flex: 1; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; font-size: 14px; outline: none; height: 42px; resize: none; font-family: inherit; line-height: 1.4; transition: border-color 0.2s; }
+        .fb-chat-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1); }
 
-        .fb-input {
-            width: 100%;
-            box-sizing: border-box;
-            border: 1px solid #e2e8f0;
-            border-radius: 6px;
-            padding: 8px;
-            font-size: 13px;
-            background: #fff;
-            outline: none;
-            resize: vertical;
-            min-height: 50px;
-            font-family: inherit;
-        }
-        
-        .fb-btn {
-            width: 100%;
-            padding: 8px;
-            border: none;
-            border-radius: 6px;
-            background: #3b82f6;
-            color: white;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            flex-shrink: 0;
-        }
-        .fb-btn:hover { background: #2563eb; }
-        .fb-btn:disabled { opacity: 0.7; cursor: not-allowed; background: #94a3b8; }
-        .fb-btn.secondary { background: #fff; color: #475569; border: 1px solid #e2e8f0; margin-bottom: 8px; }
-        .fb-btn.secondary:hover { background: #f8fafc; border-color: #cbd5e1; }
+        /* 笔记区 */
+        .fb-note-section { flex: 1; min-height: 120px; display: flex; flex-direction: column; position: relative; }
+        .fb-rich-editor { flex: 1; width: 100%; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; font-size: 15px; line-height: 1.6; color: #334155; outline: none; overflow-y: auto; background: #f8fafc; resize: none; white-space: pre-wrap; word-wrap: break-word; }
+        .fb-rich-editor:focus { background: #fff; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1); }
+        .fb-rich-editor img { max-width: 90%; border-radius: 6px; margin: 8px 0; border: 2px solid transparent; display: block; cursor: pointer; }
+        .fb-rich-editor img.selected { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2); }
+        .fb-img-resizer { position: absolute; border: 2px solid #3b82f6; pointer-events: none; z-index: 100; display: none; }
+        .fb-img-resizer.active { display: block; }
+        .fb-img-handle { position: absolute; bottom: -6px; right: -6px; width: 12px; height: 12px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; cursor: se-resize; pointer-events: auto; }
+
+        .fb-btn { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #3b82f6; color: white; font-size: 15px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .fb-btn:hover { background: #2563eb; transform: translateY(-1px); }
         .fb-btn.success { background: #10b981; }
+        .fb-loader { width: 14px; height: 14px; border: 2px solid #fff; border-bottom-color: transparent; border-radius: 50%; display: inline-block; animation: rotation 1s linear infinite; margin-right: 8px; }
+        .fb-resize-handle { position: absolute; bottom: 0; left: 0; width: 24px; height: 24px; cursor: sw-resize; z-index: 20; background: linear-gradient(45deg, transparent 50%, #cbd5e1 50%); border-bottom-left-radius: 16px; opacity: 0.5; transition: opacity 0.2s; }
+        .fb-resize-handle:hover { opacity: 1; background: linear-gradient(45deg, transparent 50%, #3b82f6 50%); }
+        
+        .fb-add-tag-input { border: none; background: transparent; width: 60px; font-size: 12px; outline: none; border-bottom: 1px dashed #cbd5e1; color: #64748b; }
+        .fb-add-tag-input:focus { border-bottom-color: #3b82f6; color: #3b82f6; width: 100px; }
 
-        .fb-loader {
-            width: 12px;
-            height: 12px;
-            border: 2px solid #3b82f6;
-            border-bottom-color: transparent;
-            border-radius: 50%;
-            display: inline-block;
-            animation: rotation 1s linear infinite;
-            margin-right: 6px;
-        }
-        .fb-plugin-btn:hover .fb-loader { border-color: white; border-bottom-color: transparent; }
-        
-        .fb-chat-typing {
-            display: flex;
-            gap: 3px;
-            padding: 6px 10px;
-            background: #f1f5f9;
-            border-radius: 6px;
-            align-self: flex-start;
-            margin-bottom: 8px;
-            width: fit-content;
-        }
-        .fb-dot {
-            width: 4px;
-            height: 4px;
-            background: #94a3b8;
-            border-radius: 50%;
-            animation: bounce 1.4s infinite ease-in-out both;
-        }
-        .fb-dot:nth-child(1) { animation-delay: -0.32s; }
-        .fb-dot:nth-child(2) { animation-delay: -0.16s; }
-        
         @keyframes rotation { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
     `;
 
-    // ==========================================
-    // 基础函数
-    // ==========================================
-
+    // 增强版 Markdown 解析器
     function parseMarkdown(text) {
         if (!text) return '';
-        let html = text.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
-        html = html.replace(/\n/g, '<br>');
-        return html;
+        let html = text
+            .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/^\s*-\s+(.*)$/gm, '<ul><li>$1</li></ul>')
+            .replace(/^\s*\d+\.\s+(.*)$/gm, '<ol><li>$1</li></ol>')
+            .replace(/<\/ul>\s*<ul>/g, '')
+            .replace(/<\/ol>\s*<ol>/g, '')
+            .replace(/\n/g, '<br>');
+        return `<div class="fb-md-content">${html}</div>`;
     }
 
     async function callBackend(endpoint, body) {
         if (!CONFIG.EXTERNAL_TOKEN) {
-            alert("未配置 Token！请在油猴菜单或代码中配置 EXTERNAL_TOKEN");
+            alert("未配置 Token！");
             return null;
         }
+
+        // 调试日志：开始请求
+        console.groupCollapsed(`[FenbiPlugin] 🚀 Calling ${endpoint}`);
+        console.log("📍 Payload:", body);
+
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: "POST",
                 url: `${CONFIG.SERVER_URL}/api/external/${endpoint}`,
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-External-Token": CONFIG.EXTERNAL_TOKEN
-                },
+                headers: { "Content-Type": "application/json", "X-External-Token": CONFIG.EXTERNAL_TOKEN },
                 data: JSON.stringify(body),
                 onload: (res) => {
                     if (res.status === 200) {
-                        try { resolve(JSON.parse(res.responseText)); } catch(e) { reject("JSON Parse Error"); }
-                    } else reject(`Error ${res.status}: ${res.responseText}`);
+                        try {
+                            const json = JSON.parse(res.responseText);
+                            
+                            // 调试日志：请求成功
+                            console.log("✅ Response:", json);
+                            if (json._debug_request) console.log("🤖 AI Request (Raw):", json._debug_request);
+                            if (json._debug_response) console.log("🤖 AI Response (Raw):", json._debug_response);
+                            if (json._debug_request_body) console.log("🤖 AI Request Body:", json._debug_request_body);
+                            console.groupEnd();
+                            
+                            resolve(json); 
+                        } catch(e) { 
+                            console.error("❌ JSON Parse Error:", e);
+                            console.groupEnd();
+                            reject("JSON Parse Error"); 
+                        }
+                    } else {
+                        console.error(`❌ API Error ${res.status}:`, res.responseText);
+                        console.groupEnd();
+                        reject(`Error ${res.status}`);
+                    }
                 },
-                onerror: (err) => reject("Network Error")
+                onerror: (err) => {
+                    console.error("❌ Network Error:", err);
+                    console.groupEnd();
+                    reject("Network Error");
+                }
             });
         });
     }
@@ -314,407 +209,517 @@
     // ==========================================
     function getQuestionData(tiContainer) {
         if (!tiContainer) return null;
-
-        // 1. 题干
         const stemNode = tiContainer.querySelector('app-format-html > div');
         let stemText = "";
         let images = [];
-        
         if (stemNode) {
             const clonedStem = stemNode.cloneNode(true);
+            
+            // 0. 移除无用标签
+            clonedStem.querySelectorAll('script, style').forEach(el => el.remove());
+            
+            // 1. 处理图片
             clonedStem.querySelectorAll('img').forEach(img => { 
                 if (img.src) images.push(img.src); 
                 const placeholder = document.createTextNode('[图片]');
                 img.parentNode.replaceChild(placeholder, img);
             });
-            stemText = clonedStem.innerText.trim();
-        }
 
-        // 2. 选项
+            // 2. 处理逻辑填空题的下划线
+            clonedStem.querySelectorAll('u').forEach(u => {
+                const text = u.textContent;
+                if (!text.replace(/[\s\u00a0]/g, '').length) {
+                    const placeholder = document.createTextNode('______');
+                    u.parentNode.replaceChild(placeholder, u);
+                }
+            });
+
+            // 3. 显式处理换行 (核心修复)
+            // 针对 detached node，innerText 可能丢失换行，改用手动注入 + textContent
+            clonedStem.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+            clonedStem.querySelectorAll('p, div, li').forEach(el => {
+                el.appendChild(document.createTextNode('\n'));
+            });
+
+            // 4. 提取文本并规范化换行
+            // 使用 textContent 避免 detached node 的 innerText 格式化丢失问题
+            // 将连续的换行符合并为一个，并清除首尾空格
+            stemText = clonedStem.textContent.replace(/\n\s*\n/g, '\n').trim();
+        }
         const options = Array.from(tiContainer.querySelectorAll('.choice-radio-label')).map(node => {
             const textNode = node.querySelector('.input-text');
             const imgNode = node.querySelector('img');
             return imgNode ? imgNode.src : (textNode ? textNode.innerText.trim() : "");
         });
-
-        // 3. 答案提取
         const answerMap = {'A':0, 'B':1, 'C':2, 'D':3};
         let correctAnswer = -1;
         let userAnswer = -1;
-
-        // 3.1 正确答案
         const correctNode = tiContainer.querySelector('.overall-item-value.correct-answer');
-        if (correctNode) {
-            correctAnswer = answerMap[correctNode.innerText.trim()] ?? -1;
-        }
+        if (correctNode) correctAnswer = answerMap[correctNode.innerText.trim()] ?? -1;
         if (correctAnswer === -1) {
              const c = tiContainer.querySelector('.input-radio.correct, .input-radio.correctLost');
              if (c) correctAnswer = answerMap[c.innerText.trim()];
         }
-
-        // 3.2 用户答案
         const yourAnswerNode = tiContainer.querySelector('.overall-item-value.your-answer');
         if (yourAnswerNode) {
             const text = yourAnswerNode.innerText.trim();
-            if (text.includes('未作答')) {
-                userAnswer = -1;
-            } else {
+            if (!text.includes('未作答')) {
                 const match = text.match(/[A-D]/);
                 if (match) userAnswer = answerMap[match[0]];
             }
         } else {
-            // 推测用户答案
             const wrongOption = tiContainer.querySelector('.input-radio.wrong');
             const correctOption = tiContainer.querySelector('.input-radio.correct');
-            
-            if (wrongOption) {
-                userAnswer = answerMap[wrongOption.innerText.trim()];
-            } else if (correctOption) {
-                // 如果显示了正确选项且没显示错误选项，或者用户处于练习模式选中了该项
-                userAnswer = answerMap[correctOption.innerText.trim()];
-            }
+            if (wrongOption) userAnswer = answerMap[wrongOption.innerText.trim()];
+            else if (correctOption) userAnswer = answerMap[correctOption.innerText.trim()];
         }
-        
-        // 如果无法确定用户选了啥，但找到了正确答案，默认用户做对了（或者不强制纠错）
-        if (userAnswer === -1 && correctAnswer !== -1) {
-             // 保持 -1，后端会处理为 "请完整解析"
-        }
-
-        // 4. 正确率
         const accNode = tiContainer.querySelector('.overall-item-value.correct-rate');
         const accuracy = parseInt(accNode?.innerText) || 60;
-
-        // 5. 考点
+        
         let tags = [];
         const tagNodes = tiContainer.querySelectorAll('.solution-keypoint-item-name'); 
         if (tagNodes.length > 0) tags = Array.from(tagNodes).map(n => n.innerText.trim()).filter(t => t);
-        tags = [...new Set(tags)];
-
-        // 6. 材料
+        
         let materialText = "";
-        const materialsContainer = document.querySelector('app-materials .material-body');
-        if (materialsContainer) {
-            const cloneMat = materialsContainer.cloneNode(true);
-            cloneMat.querySelectorAll('img').forEach(img => {
-                if (img.src && !images.includes(img.src)) images.push(img.src);
-                img.remove();
-            });
-            materialText = cloneMat.innerText.trim();
+        let materialsContainer = tiContainer.querySelector('app-materials .material-body') || tiContainer.querySelector('.material-body');
+        
+        // --- 修复：严格的材料查找逻辑 (防串题) ---
+        if (!materialsContainer) {
+             let parent = tiContainer.parentElement;
+             // 向上查找最多3层，避免跨越太远
+             for (let i = 0; i < 3 && parent && parent.tagName !== 'BODY'; i++) {
+                 // 查找当前层级下的所有 material-body
+                 const candidates = Array.from(parent.querySelectorAll('.material-body'));
+                 
+                 for (const cand of candidates) {
+                     // 1. 如果材料属于另一个题目 (ti-container)，直接忽略
+                     const owner = cand.closest('.ti-container, .solution-choice-container');
+                     if (owner && owner !== tiContainer && !owner.contains(tiContainer)) {
+                         continue;
+                     }
+
+                     // 2. 如果材料和当前题目在视觉上是分离的（中间隔了其他题目），也忽略
+                     // 这里简单判断：只要不属于别人，且是 parent 的后代，就认为是共享材料或自有材料
+                     materialsContainer = cand;
+                     break; 
+                 }
+                 if (materialsContainer) break;
+                 parent = parent.parentElement;
+             }
         }
 
-        return { stem: stemText, options, correctAnswer, userAnswer, accuracy, materials: images, tags, materialText };
+        if (materialsContainer) {
+            const cloneMat = materialsContainer.cloneNode(true);
+            cloneMat.querySelectorAll('.tooltip-container, .tooltip-mask, .expand-btn').forEach(el => el.remove());
+            cloneMat.querySelectorAll('img').forEach(img => {
+                if (img.src) { if (!images.includes(img.src)) images.push(img.src); img.style.maxWidth = '100%'; }
+            });
+            materialText = cloneMat.innerHTML.trim();
+        }
+
+        // --- 修复：增强的解析提取逻辑 (适配提供的 HTML 结构) ---
+        let analysisHtml = "";
+        // 优先尝试 ID 选择器，因为 HTML 中显示有 id="section-solution-..."
+        let solutionContainer = null;
+        
+        // 1. 尝试在 tiContainer 内部找 [id^="section-solution-"] .content
+        const solutionSection = tiContainer.querySelector('[id^="section-solution-"]');
+        if (solutionSection) {
+            solutionContainer = solutionSection.querySelector('.content');
+        }
+        
+        // 2. 如果没找到，尝试常规类名
+        if (!solutionContainer) {
+             const selectors = [
+                '.solution-content', 
+                '.solution-body', 
+                '.analysis-body', 
+                '.app-solution-content',
+                '.material-analysis'
+            ];
+            for (const sel of selectors) {
+                const el = tiContainer.querySelector(sel);
+                if (el && el.innerText.trim().length > 5) {
+                    solutionContainer = el;
+                    break;
+                }
+            }
+        }
+        
+        // 3. 暴力查找：如果还没找到，找所有 section，看 title 是否包含 "解析"
+        if (!solutionContainer) {
+            const sections = tiContainer.querySelectorAll('section');
+            for (const sec of sections) {
+                const title = sec.querySelector('.solution-title');
+                if (title && title.innerText.includes('解析') && !title.innerText.includes('视频')) {
+                    solutionContainer = sec.querySelector('.content');
+                    break;
+                }
+            }
+        }
+
+        if (solutionContainer) {
+            const cloneSol = solutionContainer.cloneNode(true);
+            cloneSol.querySelectorAll('script, style, .expand-btn').forEach(el => el.remove());
+            analysisHtml = cloneSol.innerHTML.trim();
+        }
+        
+        return { stem: stemText, options, correctAnswer, userAnswer, accuracy, materials: images, tags, materialText, analysisHtml };
     }
 
-    // ==========================================
-    // 全局面板管理
-    // ==========================================
+    function makeResizable(el, handle) { 
+        let isResizing = false; let startX, startY, startW, startH;
+        handle.addEventListener('mousedown', (e) => { isResizing = true; startX = e.clientX; startY = e.clientY; startW = el.offsetWidth; startH = el.offsetHeight; e.preventDefault(); e.stopPropagation(); });
+        window.addEventListener('mousemove', (e) => { if (!isResizing) return; el.style.width = `${Math.max(480, startW - (e.clientX - startX))}px`; el.style.height = `${Math.max(500, startH + (e.clientY - startY))}px`; });
+        window.addEventListener('mouseup', () => { isResizing = false; });
+    }
+
+    // --- 修复：打字机特效 ---
+    async function typewriterEffect(container, text) {
+        // 先清空，显示光标
+        container.innerHTML = '<span class="cursor"></span>';
+        
+        const chunkSize = 2; 
+        const len = text.length;
+        let currentText = '';
+        
+        for (let i = 0; i < len; i += chunkSize) {
+            currentText += text.substring(i, i + chunkSize);
+            // 实时解析 Markdown 并追加光标
+            container.innerHTML = parseMarkdown(currentText) + '<span class="cursor"></span>';
+            container.scrollTop = container.scrollHeight;
+            // 稍快的打字速度 (15ms)
+            await new Promise(r => setTimeout(r, 15));
+        }
+        
+        // 移除光标
+        const cursor = container.querySelector('.cursor');
+        if (cursor) cursor.remove();
+    }
 
     function ensureGlobalPanel() {
-        if (globalPanel) return globalPanel;
-
+        if (globalPanel && document.body.contains(globalPanel)) return globalPanel;
         globalPanel = document.createElement('div');
         globalPanel.className = 'fb-smart-panel';
         globalPanel.innerHTML = `
-            <div class="fb-panel-header">
-                <h4>🤖 AI 错题助手</h4>
-                <button id="fb-panel-close" style="border:none;background:transparent;cursor:pointer;font-size:24px;color:#94a3b8;line-height:1;">×</button>
-            </div>
-            <div id="fb-panel-body" style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
-                <!-- 动态内容 -->
-            </div>
+            <div class="fb-panel-header"><h4>🤖 错题录入助手</h4><button id="fb-panel-close" style="border:none;background:transparent;cursor:pointer;font-size:24px;color:#94a3b8;line-height:1;">×</button></div>
+            <div id="fb-panel-body" style="flex:1; display:flex; flex-direction:column; overflow:hidden;"></div>
+            <div class="fb-resize-handle" id="fb-resize-sw"></div>
         `;
         document.body.appendChild(globalPanel);
-
-        // 绑定关闭事件
-        globalPanel.querySelector('#fb-panel-close').onclick = () => {
-            globalPanel.classList.remove('active');
-            currentActiveContainer = null;
+        
+        // 面板内显隐逻辑
+        const hidePanel = () => { 
+            globalPanel.classList.remove('active'); 
+            globalPanel.style.pointerEvents = 'none'; 
+            currentActiveContainer = null; 
         };
+        
+        globalPanel.querySelector('#fb-panel-close').onclick = hidePanel;
+        
+        // 鼠标移出面板自动隐藏逻辑 (增加延时)
+        globalPanel.addEventListener('mouseenter', () => {
+            clearTimeout(autoCloseTimer);
+        });
+        globalPanel.addEventListener('mouseleave', () => {
+            // 800ms 延迟，给用户足够时间移动
+            autoCloseTimer = setTimeout(hidePanel, 800); 
+        });
 
+        makeResizable(globalPanel, globalPanel.querySelector('#fb-resize-sw'));
         return globalPanel;
     }
 
-    function renderPanelContent(data) {
+    function renderPanelContent(data, qDataRaw) {
         const body = globalPanel.querySelector('#fb-panel-body');
-        if (!data || !data.aiResult) {
-            body.innerHTML = '<div style="padding:20px;text-align:center;color:#94a3b8;">数据加载错误</div>';
-            return;
-        }
+        if (!data) return;
 
         const { aiResult, chatHistory } = data;
+        const userAnswer = qDataRaw ? qDataRaw.userAnswer : -1;
+        const correctAnswer = qDataRaw ? qDataRaw.correctAnswer : -1;
+        const wrongOptionChar = (userAnswer !== -1 && userAnswer !== correctAnswer) ? String.fromCharCode(65 + userAnswer) : 'A';
+        
+        // 确保 chatHistory 初始化 (空数组)
+        if (!data.chatHistory) data.chatHistory = [];
+
+        const suggestions = [
+            { label: `为什么不选${wrongOptionChar}?`, text: `这道题为什么不能选${wrongOptionChar}？请详细对比正确选项和${wrongOptionChar}的区别。` },
+            { label: "做题技巧", text: "这类题目有什么通用的解题技巧或秒杀法吗？" },
+            { label: "举一反三", text: "请出一道考察相同知识点的类似题目，并附带解析。" }
+        ];
+
+        const categoryOptions = Object.keys(SUB_CATEGORY_MAP).map(c => `<option value="${c}" ${c === aiResult.category ? 'selected' : ''}>${c}</option>`).join('');
+        const currentSubCats = SUB_CATEGORY_MAP[aiResult.category] || [];
+        const subCategoryOptions = currentSubCats.map(sc => `<option value="${sc}" ${sc === aiResult.subCategory ? 'selected' : ''}>${sc}</option>`).join('');
+        const renderTags = (tags) => tags.map(t => `<span class="fb-badge" data-tag="${t}">${t} <span class="remove-tag">×</span></span>`).join('');
 
         body.innerHTML = `
-            <div style="margin-bottom:10px;flex-shrink:0;">
-                <span class="fb-badge" style="background:#eff6ff;color:#1d4ed8">${aiResult.category}</span>
-                <span class="fb-badge" style="background:#f0fdf4;color:#15803d">${aiResult.subCategory}</span>
-                ${(aiResult.tags || []).map(t => `<span class="fb-badge" style="background:#fff7ed;color:#c2410c">#${t}</span>`).join('')}
+            <div style="margin-bottom:10px;flex-shrink:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <select id="fb-category-select" class="fb-select">${categoryOptions}</select>
+                <select id="fb-subcategory-select" class="fb-select">${subCategoryOptions}</select>
+                <div id="fb-tags-container" style="display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center;">
+                    ${renderTags(aiResult.tags || [])}
+                    <input type="text" class="fb-add-tag-input" placeholder="+ 考点" />
+                </div>
             </div>
             
             <div class="fb-scroll-area">
-                <!-- AI 解析 -->
-                <div class="fb-ai-content">${aiResult.miniAnalysis}</div>
-                
-                <!-- 聊天区 -->
-                <div class="fb-chat-section">
+                <div class="fb-section fb-chat-section">
+                    <div style="font-size:12px;color:#94a3b8;margin-bottom:6px;flex-shrink:0;">AI 助手</div>
                     <div class="fb-chat-msgs" id="chat-msgs"></div>
+                    <div class="fb-suggestions">${suggestions.map((s, idx) => `<div class="fb-chip" data-idx="${idx}">${s.label}</div>`).join('')}</div>
                     <div class="fb-chat-input-box">
-                        <textarea class="fb-chat-input" id="chat-input" placeholder="有疑问？输入后点发送 (回车换行)" rows="1"></textarea>
-                        <button id="send-chat-btn" style="border:none;background:#3b82f6;color:white;border-radius:6px;padding:0 12px;height:36px;cursor:pointer;font-weight:bold;font-size:12px;flex-shrink:0;">发送</button>
+                        <textarea class="fb-chat-input" id="chat-input" placeholder="输入问题..." rows="1"></textarea>
+                        <button id="send-chat-btn" style="border:none;background:#3b82f6;color:white;border-radius:6px;padding:0 12px;height:42px;cursor:pointer;font-weight:bold;font-size:12px;flex-shrink:0;">发送</button>
                     </div>
                 </div>
-
-                <!-- 笔记区 -->
-                <div class="fb-note-section">
-                    <button class="fb-btn secondary" id="copy-btn">📋 复制解析到笔记</button>
-                    <textarea class="fb-input" id="user-note" placeholder="我的心得笔记..."></textarea>
+                <div class="fb-splitter" id="section-splitter"></div>
+                <div class="fb-section fb-note-section">
+                    <div style="font-size:12px;color:#94a3b8;margin-bottom:6px;flex-shrink:0;">我的笔记</div>
+                    <div id="user-note" class="fb-rich-editor" contenteditable="true" placeholder="在此记录学习心得..."></div>
+                    <div id="img-resizer" class="fb-img-resizer"><div class="fb-img-handle"></div></div>
                 </div>
             </div>
-
-            <button class="fb-btn" id="save-btn" style="margin-top:12px;height:40px;">同步到错题本</button>
+            <button class="fb-btn" id="save-btn" style="margin-top:16px;">同步到错题本</button>
         `;
 
-        // 绑定事件
-        const chatMsgs = body.querySelector('#chat-msgs');
-        const chatInput = body.querySelector('#chat-input');
-        const sendBtn = body.querySelector('#send-chat-btn');
-        const saveBtn = body.querySelector('#save-btn');
-        const copyBtn = body.querySelector('#copy-btn');
-        const userNote = body.querySelector('#user-note');
+        const tagsContainer = body.querySelector('#fb-tags-container');
+        const tagInput = body.querySelector('.fb-add-tag-input');
+        
+        tagsContainer.addEventListener('click', (e) => {
+            if (e.target.classList.contains('remove-tag')) {
+                const tag = e.target.parentElement.getAttribute('data-tag');
+                aiResult.tags = aiResult.tags.filter(t => t !== tag);
+                e.target.parentElement.remove();
+            }
+        });
 
-        // 1. 渲染聊天历史
-        if (chatHistory.length > 1) {
-            chatHistory.slice(1).forEach(msg => {
+        tagInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const val = e.target.value.trim();
+                if (val && !aiResult.tags.includes(val)) {
+                    aiResult.tags.push(val);
+                    const span = document.createElement('span');
+                    span.className = 'fb-badge';
+                    span.setAttribute('data-tag', val);
+                    span.innerHTML = `${val} <span class="remove-tag">×</span>`;
+                    tagsContainer.insertBefore(span, tagInput);
+                    e.target.value = '';
+                }
+            }
+        });
+
+        // 气泡点击事件
+        const chatInput = body.querySelector('#chat-input');
+        const suggestionsDiv = body.querySelector('.fb-suggestions');
+        suggestionsDiv.addEventListener('click', (e) => {
+            if (e.target.classList.contains('fb-chip')) {
+                const idx = e.target.getAttribute('data-idx');
+                if (suggestions[idx]) {
+                    chatInput.value = suggestions[idx].text;
+                    chatInput.focus();
+                }
+            }
+        });
+
+        body.querySelector('#fb-category-select').addEventListener('change', (e) => {
+             const newCat = e.target.value; aiResult.category = newCat;
+             const subs = SUB_CATEGORY_MAP[newCat] || []; aiResult.subCategory = subs[0] || '';
+             body.querySelector('#fb-subcategory-select').innerHTML = subs.map(s => `<option value="${s}" ${s === aiResult.subCategory ? 'selected' : ''}>${s}</option>`).join('');
+        });
+        body.querySelector('#fb-subcategory-select').addEventListener('change', (e) => { aiResult.subCategory = e.target.value; });
+
+        const userNote = body.querySelector('#user-note');
+        if (data.userNoteValue) userNote.innerHTML = data.userNoteValue;
+        userNote.addEventListener('input', (e) => { data.userNoteValue = e.target.innerHTML; });
+
+        const chatMsgs = body.querySelector('#chat-msgs');
+        
+        // 渲染历史消息 (直接显示)
+        const renderHistory = () => {
+            chatMsgs.innerHTML = '';
+            data.chatHistory.forEach(msg => {
                 const div = document.createElement('div');
                 div.className = `fb-chat-msg ${msg.role === 'user' ? 'user' : 'ai'}`;
                 div.innerHTML = parseMarkdown(msg.content);
                 chatMsgs.appendChild(div);
             });
             setTimeout(() => chatMsgs.scrollTop = chatMsgs.scrollHeight, 50);
-        }
-
-        // 2. 聊天逻辑
-        const sendChat = async () => {
+        };
+        renderHistory();
+        
+        const handleSend = async () => {
             const msg = chatInput.value.trim();
             if (!msg) return;
-
-            // UI 更新
+            
+            // 1. 显示用户消息
+            data.chatHistory.push({ role: 'user', content: msg });
             const userDiv = document.createElement('div');
             userDiv.className = 'fb-chat-msg user';
-            userDiv.innerText = msg;
+            userDiv.innerHTML = parseMarkdown(msg);
             chatMsgs.appendChild(userDiv);
             chatInput.value = '';
-
-            const loadingDiv = document.createElement('div');
-            loadingDiv.className = 'fb-chat-typing';
-            loadingDiv.innerHTML = '<div class="fb-dot"></div><div class="fb-dot"></div><div class="fb-dot"></div>';
-            chatMsgs.appendChild(loadingDiv);
             chatMsgs.scrollTop = chatMsgs.scrollHeight;
-            chatInput.disabled = true;
+
+            // 2. 显示“思考中”状态 (Waiting Effect)
+            const aiDiv = document.createElement('div');
+            aiDiv.className = 'fb-chat-msg ai';
+            aiDiv.innerHTML = '<span class="thinking-dots" style="color:#94a3b8;font-size:12px;">AI思考中</span>';
+            chatMsgs.appendChild(aiDiv);
+            chatMsgs.scrollTop = chatMsgs.scrollHeight;
 
             try {
-                // 获取当前题目最新上下文
-                const qData = getQuestionData(currentActiveContainer);
-                const chatRes = await callBackend('chat', {
-                    stem: qData.stem,
-                    options: qData.options,
-                    history: chatHistory.slice(-6),
-                    newMessage: msg
+                const res = await callBackend('chat', { 
+                    stem: qDataRaw.stem, 
+                    options: qDataRaw.options, 
+                    history: data.chatHistory.slice(-6), 
+                    newMessage: msg 
                 });
-
-                chatMsgs.removeChild(loadingDiv);
-                if (chatRes && chatRes.reply) {
-                    const aiDiv = document.createElement('div');
-                    aiDiv.className = 'fb-chat-msg ai';
-                    aiDiv.innerHTML = parseMarkdown(chatRes.reply);
-                    chatMsgs.appendChild(aiDiv);
-                    
-                    // 更新历史
-                    chatHistory.push({ role: 'user', content: msg });
-                    chatHistory.push({ role: 'assistant', content: chatRes.reply });
-                    
-                    // 更新缓存
-                    fbPanelCache.set(currentActiveContainer, { 
-                        stem: qData.stem, 
-                        aiResult: aiResult, 
-                        chatHistory: chatHistory 
-                    });
+                
+                if (res.reply) {
+                    data.chatHistory.push({ role: 'assistant', content: res.reply });
+                    // 3. 拿到结果后，清空“思考中”，开始打字机输出
+                    await typewriterEffect(aiDiv, res.reply);
                 }
             } catch (e) {
-                if(loadingDiv.parentNode) chatMsgs.removeChild(loadingDiv);
-                alert("发送失败，请重试");
-            } finally {
-                chatInput.disabled = false;
-                chatInput.focus();
-                chatMsgs.scrollTop = chatMsgs.scrollHeight;
+                aiDiv.innerHTML = `<span style="color:red">请求出错: ${e}</span>`;
             }
         };
 
-        sendBtn.onclick = sendChat;
-        // 注意：这里不监听 Enter，完全符合用户需求
+        body.querySelector('#send-chat-btn').onclick = handleSend;
+        chatInput.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }};
 
-        // 3. 复制笔记
-        copyBtn.onclick = () => {
-            const tempDiv = document.createElement("div");
-            tempDiv.innerHTML = aiResult.miniAnalysis;
-            userNote.value = (userNote.value + '\n\n【AI解析】\n' + tempDiv.innerText).trim();
-            copyBtn.innerText = '✅ 已复制';
-            setTimeout(() => copyBtn.innerText = '📋 复制解析到笔记', 2000);
-        };
+        body.querySelector('#save-btn').onclick = async () => {
+            const btn = body.querySelector('#save-btn'); btn.disabled = true; btn.innerHTML = '<span class="fb-loader"></span> 保存中...';
+            
+            // Yield to UI
+            await new Promise(r => setTimeout(r, 50));
 
-        // 4. 保存同步
-        saveBtn.onclick = async () => {
-            saveBtn.disabled = true;
-            saveBtn.innerHTML = '<span class="fb-loader"></span> 同步中...';
             try {
-                const qData = getQuestionData(currentActiveContainer);
-                const finalNote = userNote.value ? `<p>${userNote.value.replace(/\n/g, '<br/>')}</p>` : '';
-                
+                // 保存时刻重新抓取解析，以防页面动态加载
+                const latestQData = getQuestionData(currentActiveContainer);
+                const finalAnalysis = latestQData.analysisHtml || qDataRaw.analysisHtml || '';
+                const finalNote = userNote.innerHTML;
+
                 await callBackend('save', {
                     id: Date.now().toString(),
                     createdAt: Date.now(),
-                    stem: qData.stem,
-                    options: qData.options,
-                    materials: qData.materials,
-                    materialText: qData.materialText,
-                    correctAnswer: qData.correctAnswer,
-                    accuracy: qData.accuracy,
-                    category: aiResult.category,
-                    subCategory: aiResult.subCategory,
-                    tags: aiResult.tags,
-                    noteText: finalNote,
+                    stem: qDataRaw.stem, options: qDataRaw.options, 
+                    materials: qDataRaw.materials, materialText: qDataRaw.materialText,
+                    correctAnswer: qDataRaw.correctAnswer, accuracy: qDataRaw.accuracy,
+                    category: aiResult.category, subCategory: aiResult.subCategory, tags: aiResult.tags,
+                    noteText: finalNote, 
+                    analysis: finalAnalysis,
                     mistakeCount: 0
                 });
-
-                saveBtn.classList.add('success');
-                saveBtn.innerHTML = '✓ 已存入';
-                
-                // 自动关闭
-                setTimeout(() => {
-                    globalPanel.classList.remove('active');
-                    currentActiveContainer = null;
-                }, 1000);
-            } catch (e) {
-                alert("保存失败: " + e);
-                saveBtn.disabled = false;
-                saveBtn.innerHTML = '重试';
-            }
+                btn.classList.add('success'); btn.innerHTML = '✓ 已存入';
+                setTimeout(() => { globalPanel.classList.remove('active'); globalPanel.style.pointerEvents = 'none'; currentActiveContainer = null; }, 1000);
+            } catch (e) { alert("保存失败: " + e); btn.disabled = false; btn.innerHTML = '重试'; }
         };
     }
 
-    // ==========================================
-    // 启动流程
-    // ==========================================
-
-    async function startAnalysis(tiContainer, btn) {
+    async function startAnalysis(tiContainer, btn, isBatch = false) {
         currentActiveContainer = tiContainer;
-        ensureGlobalPanel();
+        if (!isBatch) ensureGlobalPanel();
+        const qData = getQuestionData(tiContainer);
+        if (!qData) { alert("无法获取题目数据"); return; }
         
-        // 1. 检查缓存
+        // 检查缓存 (实现数据复用)
         if (fbPanelCache.has(tiContainer)) {
-            const cached = fbPanelCache.get(tiContainer);
-            // 简单验证题干是否匹配（防止题目列表刷新后DOM重用）
-            const currentQ = getQuestionData(tiContainer);
-            if (currentQ && currentQ.stem && cached.stem.substring(0, 20) === currentQ.stem.substring(0, 20)) {
-                renderPanelContent(cached);
-                globalPanel.classList.add('active');
-                return;
+            if (!isBatch) { 
+                const cachedData = fbPanelCache.get(tiContainer);
+                renderPanelContent(cachedData, cachedData.qData); 
+                globalPanel.classList.add('active'); 
+                globalPanel.style.pointerEvents = 'auto'; 
             }
+            return;
         }
 
-        // 2. 无缓存，开始分析
-        if (!CONFIG.EXTERNAL_TOKEN) {
-            const token = prompt("请输入错题本 External Token:");
-            if (token) {
-                GM_setValue('external_token', token);
-                CONFIG.EXTERNAL_TOKEN = token;
-            } else return;
-        }
+        let allBase64Materials = qData.materials || [];
+        if (qData.materialText && /<img/i.test(qData.materialText)) { qData.materials = []; }
 
-        const originalBtnText = btn.innerHTML;
-        btn.innerHTML = '<span class="fb-loader"></span> 分析中';
-        btn.style.pointerEvents = 'none';
+        btn.innerHTML = '<span class="fb-loader"></span> 识别中';
+        
+        // Yield to UI
+        await new Promise(r => setTimeout(r, 50));
 
         try {
-            const qData = getQuestionData(tiContainer);
-            if (!qData || !qData.stem) throw "未找到题目内容";
-
+            const stripBase64 = (html) => html ? html.replace(/src="data:image\/[^;]+;base64,[^"]+"/g, 'src="[IMG]"') : '';
             const payload = {
-                stem: qData.stem,
-                options: qData.options,
-                materials: qData.materials,
-                materialText: qData.materialText,
-                userAnswer: qData.userAnswer,
-                correctAnswer: qData.correctAnswer
+                stem: qData.stem, options: qData.options, materials: allBase64Materials, 
+                materialText: stripBase64(qData.materialText), userAnswer: qData.userAnswer, correctAnswer: qData.correctAnswer
             };
-
             const aiResult = await callBackend('analyze', payload);
-            
             if (aiResult) {
-                // 补全 tags
-                aiResult.tags = qData.tags || [];
+                const combinedTags = [...new Set([...(qData.tags || []), ...(aiResult.tags || [])])];
+                aiResult.tags = combinedTags;
                 
-                const cacheData = {
-                    stem: qData.stem,
-                    aiResult: aiResult,
-                    chatHistory: [{ role: 'assistant', content: aiResult.miniAnalysis }]
+                const cacheData = { 
+                    stem: qData.stem, 
+                    aiResult: aiResult, 
+                    chatHistory: [], // 将在 renderPanelContent 中初始化默认开场白
+                    userNoteValue: '', 
+                    qData: qData 
                 };
-
                 fbPanelCache.set(tiContainer, cacheData);
-                renderPanelContent(cacheData);
-                globalPanel.classList.add('active');
+                
+                btn.classList.add('done'); btn.innerHTML = '已识别';
+                if (!isBatch) { 
+                    renderPanelContent(cacheData, qData); 
+                    globalPanel.classList.add('active'); 
+                    globalPanel.style.pointerEvents = 'auto'; 
+                }
             }
-        } catch (e) {
-            console.error(e);
-            alert("分析失败: " + e);
-        } finally {
-            btn.innerHTML = originalBtnText;
-            btn.style.pointerEvents = 'auto';
-        }
+        } catch (e) { console.error(e); btn.innerHTML = 'AI识别'; alert("提取失败"); }
     }
 
-    function initButton(tiContainer) {
-        // 找到标题栏右侧
-        const titleRightUl = tiContainer.querySelector('.title .title-right');
-        if (!titleRightUl) return;
-        if (titleRightUl.querySelector('.fb-plugin-btn-li')) return;
-
-        const btnLi = document.createElement('li');
-        btnLi.className = 'fb-plugin-btn-li';
+    function initButton(tiContainer) { 
+        let targetArea = tiContainer.querySelector('.title .title-right') || tiContainer.querySelector('.title');
+        if (!targetArea || targetArea.querySelector('.fb-plugin-btn-li')) return;
         
-        const btn = document.createElement('button');
-        btn.className = 'fb-plugin-btn';
-        btn.innerHTML = '<span>⚡</span>&nbsp;AI 分析';
+        const btnLi = document.createElement('li'); btnLi.className = 'fb-plugin-btn-li';
+        const btn = document.createElement('button'); btn.className = 'fb-plugin-btn'; btn.innerHTML = '<span>⚡</span>&nbsp;AI识别';
         
-        // 强力点击事件
-        btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-            startAnalysis(tiContainer, btn);
+        // 点击逻辑：开始分析
+        btn.addEventListener('click', (e) => { 
+            e.preventDefault(); e.stopPropagation(); 
+            startAnalysis(tiContainer, btn); 
         }, true);
-        
+
+        // --- 修复：悬停显隐逻辑 (800ms 延迟) ---
+        btn.addEventListener('mouseenter', () => {
+            if (fbPanelCache.has(tiContainer)) {
+                clearTimeout(autoCloseTimer);
+                currentActiveContainer = tiContainer;
+                const cache = fbPanelCache.get(tiContainer);
+                ensureGlobalPanel(); 
+                renderPanelContent(cache, cache.qData);
+                globalPanel.classList.add('active');
+                globalPanel.style.pointerEvents = 'auto';
+            }
+        });
+
+        btn.addEventListener('mouseleave', () => {
+            if (fbPanelCache.has(tiContainer)) {
+                autoCloseTimer = setTimeout(() => {
+                    if (globalPanel) {
+                        globalPanel.classList.remove('active');
+                        globalPanel.style.pointerEvents = 'none';
+                        currentActiveContainer = null;
+                    }
+                }, 800); 
+            }
+        });
+
         btnLi.appendChild(btn);
-        titleRightUl.insertBefore(btnLi, titleRightUl.firstChild);
+        if (targetArea.tagName === 'UL') targetArea.insertBefore(btnLi, targetArea.firstChild); else targetArea.appendChild(btnLi);
     }
 
     function init() {
-        const styleId = 'fb-plugin-styles';
-        if (!document.getElementById(styleId)) {
-            const styleTag = document.createElement('style');
-            styleTag.id = styleId;
-            styleTag.textContent = STYLES;
-            document.head.appendChild(styleTag);
-        }
-
-        const containers = document.querySelectorAll('.ti-container');
-        containers.forEach(c => initButton(c));
+        if (!document.getElementById('fb-plugin-styles')) { const s = document.createElement('style'); s.id = 'fb-plugin-styles'; s.textContent = STYLES; document.head.appendChild(s); }
+        document.querySelectorAll('.ti-container, .solution-choice-container').forEach(c => initButton(c));
     }
-
-    // 监听 DOM 变化
-    const observer = new MutationObserver(init);
-    observer.observe(document.body, { childList: true, subtree: true });
     
-    // 初始运行
-    setTimeout(init, 1000);
-
+    const observer = new MutationObserver(init); observer.observe(document.body, { childList: true, subtree: true });
+    setInterval(init, 2000); setTimeout(init, 1000);
 })();

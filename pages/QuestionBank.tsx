@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { getQuestions, deleteQuestion, saveQuestion, hydrateQuestion, restoreQuestion } from '../services/storageService';
 import { Question, QuestionCategory } from '../types';
 import { SUB_CATEGORY_MAP } from '../constants';
-import { Edit2, Trash, Calendar, Search, Filter, Loader2, Hash, GraduationCap, ChevronLeft, ChevronRight, ImageIcon, BookMarked, Trash2, RotateCcw, AlertTriangle } from 'lucide-react';
+import { Edit2, Trash, Calendar, Search, Filter, Loader2, Hash, GraduationCap, ChevronLeft, ChevronRight, ImageIcon, BookMarked, Trash2, RotateCcw, AlertTriangle, BookOpen } from 'lucide-react';
 
 const checkDate = (timestamp: number, type: 'today' | 'yesterday' | '3days' | 'week' | 'month' | 'all') => {
     if (type === 'all') return true;
@@ -30,9 +30,11 @@ const ITEMS_PER_PAGE = 10;
 const QuestionBank = () => {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isEmptying, setIsEmptying] = useState(false);
   const [filterCategory, setFilterCategory] = useState<string>('All');
   const [filterSubCategory, setFilterSubCategory] = useState<string>('All');
   const [searchTerm, setSearchTerm] = useState('');
+  // 修正：默认筛选改为 'today'
   const [timeFilter, setTimeFilter] = useState<'all' | 'today' | 'yesterday' | '3days' | 'week' | 'month'>('today');
   const [statusFilter, setStatusFilter] = useState<'all' | 'mastered' | 'not_mastered' | 'deleted'>('not_mastered');
   const [accRange, setAccRange] = useState({ min: 0, max: 100 });
@@ -48,7 +50,6 @@ const QuestionBank = () => {
   useEffect(() => { setCurrentPage(1); }, [filterCategory, filterSubCategory, searchTerm, timeFilter, accRange, statusFilter]);
 
   const filteredQuestions = questions.filter(q => {
-    // Soft-delete filtering
     if (statusFilter === 'deleted') {
         if (!q.deletedAt) return false;
     } else {
@@ -102,6 +103,30 @@ const QuestionBank = () => {
     }
   };
 
+  const handleEmptyTrash = async () => {
+      const trashQuestions = questions.filter(q => q.deletedAt);
+      const count = trashQuestions.length;
+      if (count === 0) return;
+
+      if (window.confirm(`⚠️ 高危操作警告\n\n确定要永久清空回收站中的 ${count} 道题目吗？\n此操作将彻底物理删除这些题目及其图片资源，无法恢复！`)) {
+          setIsEmptying(true);
+          try {
+              const batchSize = 5;
+              for (let i = 0; i < count; i += batchSize) {
+                  const batch = trashQuestions.slice(i, i + batchSize);
+                  await Promise.all(batch.map(q => deleteQuestion(q.id, true)));
+              }
+              setQuestions(prev => prev.filter(q => !q.deletedAt));
+              alert("回收站已清空");
+          } catch (e) {
+              console.error(e);
+              alert("清空过程中发生错误，可能部分题目未删除");
+          } finally {
+              setIsEmptying(false);
+          }
+      }
+  };
+
   const handleRestore = async (id: string) => {
       setTogglingId(id);
       await restoreQuestion(id);
@@ -137,7 +162,18 @@ const QuestionBank = () => {
                 </span>
             )}
           </div>
-          <Link to="/add" className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold shadow">新增错题</Link>
+          {statusFilter === 'deleted' ? (
+              <button 
+                onClick={handleEmptyTrash} 
+                disabled={isEmptying || !questions.some(q => q.deletedAt)}
+                className="bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-red-100 flex items-center disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isEmptying ? <Loader2 size={16} className="animate-spin mr-2"/> : <Trash2 size={16} className="mr-2"/>}
+                一键清空
+              </button>
+          ) : (
+              <Link to="/add" className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold shadow hover:bg-blue-700 transition-colors">新增错题</Link>
+          )}
         </div>
         <div className="flex flex-col gap-3">
           <div className="flex gap-2">
@@ -187,7 +223,6 @@ const QuestionBank = () => {
                   <button key={cat} className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${filterCategory === cat ? 'bg-blue-500 text-white' : 'text-slate-600'}`} onClick={() => { setFilterCategory(cat); setFilterSubCategory('All'); }}>{cat}</button>
                 ))}
             </div>
-            {/* Sub Categories */}
             {filterCategory !== 'All' && (
                 <div className="flex gap-2 flex-wrap animate-fade-in pl-1 pt-1 border-t border-gray-100">
                      <button onClick={() => setFilterSubCategory('All')} className={`px-3 py-1 rounded-lg text-xs border ${filterSubCategory === 'All' ? 'bg-blue-50 text-blue-600 border-blue-200 font-bold' : 'bg-white text-slate-500 border-gray-200'}`}>全部题型</button>
@@ -204,7 +239,7 @@ const QuestionBank = () => {
         {filteredQuestions.length === 0 ? (
            <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-gray-300">
                <p className="text-slate-400">{statusFilter === 'deleted' ? '回收站空空如也。' : '没有找到匹配的题目。'}</p>
-               {timeFilter === 'today' && <button onClick={() => setTimeFilter('all')} className="mt-4 text-blue-500 text-sm font-bold hover:underline">查看全部题目</button>}
+               {timeFilter === 'today' && statusFilter !== 'deleted' && <button onClick={() => setTimeFilter('all')} className="mt-4 text-blue-500 text-sm font-bold hover:underline">查看全部题目</button>}
            </div>
         ) : (
             <>
@@ -229,9 +264,14 @@ const QuestionBank = () => {
                                 {q.materials.map((m, midx) => m === '__IMAGE_REF__' ? <div key={midx} className="h-40 bg-gray-100 rounded-lg animate-pulse"></div> : <img key={midx} src={m} className="w-full object-contain rounded-lg border border-gray-100 max-h-80" alt="Material" />)}
                             </div>
                         )}
-                        {q.materialText && <div className="p-4 bg-gray-50 rounded-lg border-l-4 border-blue-200 text-lg leading-relaxed whitespace-pre-wrap text-slate-800">{q.materialText}</div>}
                         
-                        {/* Modified: Added whitespace-pre-wrap to handle newlines in stem */}
+                        {q.materialText && (
+                            <div 
+                                className="p-4 bg-gray-50 rounded-lg border-l-4 border-blue-200 text-lg leading-relaxed text-slate-800 rich-text-display"
+                                dangerouslySetInnerHTML={{ __html: q.materialText.replace(/\n/g, '<br/>') }}
+                            ></div>
+                        )}
+                        
                         <h2 className="font-bold text-slate-800 text-lg leading-relaxed whitespace-pre-wrap">{q.stem}</h2>
                         
                         <div className="space-y-2">
@@ -244,11 +284,18 @@ const QuestionBank = () => {
                         </div>
                    </div>
                    
+                   {/* Analysis Section */}
+                   {q.analysis && (
+                        <div className="bg-blue-50 p-6 border-t border-blue-100">
+                             <div className="flex items-center mb-4 text-blue-800 font-bold"><BookOpen size={16} className="mr-2"/> 题目解析</div>
+                             <div className="mb-4 bg-white p-4 rounded-xl border border-blue-100 text-slate-700 text-base leading-relaxed rich-text-display" dangerouslySetInnerHTML={{ __html: q.analysis }}></div>
+                        </div>
+                   )}
+
                    {(q.noteText || q.notesImage) && (
                         <div className="bg-amber-50 p-6 border-t border-amber-100">
                             <div className="flex items-center mb-4 text-amber-800 font-bold"><BookMarked size={16} className="mr-2"/> 我的笔记</div>
-                            {/* Changed: Increased font size to text-base and removed prose-sm */}
-                            {q.noteText && <div className="mb-4 bg-white p-4 rounded-xl border border-amber-100 text-slate-700 text-base leading-relaxed prose max-w-none" dangerouslySetInnerHTML={{ __html: q.noteText }}></div>}
+                            {q.noteText && <div className="mb-4 bg-white p-4 rounded-xl border border-amber-100 text-slate-700 text-base leading-relaxed rich-text-display" dangerouslySetInnerHTML={{ __html: q.noteText }}></div>}
                             {!q.noteText && q.notesImage && <img src={q.notesImage === '__IMAGE_REF__' ? '' : q.notesImage} className="max-w-full rounded border border-amber-200" alt="Note"/>}
                         </div>
                     )}

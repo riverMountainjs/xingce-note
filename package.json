@@ -1,3 +1,4 @@
+
 {
   "name": "xingce-mistake-book",
   "private": true,
@@ -5,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:worker": "wrangler pages dev . --d1 DB -- npm run dev",
     "build": "vite build",
     "preview": "vite preview"
   },
