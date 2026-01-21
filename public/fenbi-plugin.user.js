@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name         行测错题本智能助手 (粉笔专用)
 // @namespace    http://tampermonkey.net/
-// @version      10.7
+// @version      10.14
 // @description  AI 原地辅助录入：自动分类提取、AI 对话助手（支持追问）、可缩放富文本笔记、异步静默同步到错题本。
 // @author       You
 // @match        *://*.fenbi.com/*
@@ -209,6 +209,7 @@
     // ==========================================
     function getQuestionData(tiContainer) {
         if (!tiContainer) return null;
+
         const stemNode = tiContainer.querySelector('app-format-html > div');
         let stemText = "";
         let images = [];
@@ -219,10 +220,10 @@
             clonedStem.querySelectorAll('script, style').forEach(el => el.remove());
             
             // 1. 处理图片
-            clonedStem.querySelectorAll('img').forEach(img => { 
+            Array.from(clonedStem.querySelectorAll('img')).forEach(img => { 
                 if (img.src) images.push(img.src); 
-                const placeholder = document.createTextNode('[图片]');
-                img.parentNode.replaceChild(placeholder, img);
+                // 移除图片节点，不再保留[图片]占位符
+                img.remove();
             });
 
             // 2. 处理逻辑填空题的下划线
@@ -281,29 +282,63 @@
         if (tagNodes.length > 0) tags = Array.from(tagNodes).map(n => n.innerText.trim()).filter(t => t);
         
         let materialText = "";
-        let materialsContainer = tiContainer.querySelector('app-materials .material-body') || tiContainer.querySelector('.material-body');
+        let materialsContainer = null;
+
+        // --- 修复：更精准的材料查找逻辑 ---
         
-        // --- 修复：严格的材料查找逻辑 (防串题) ---
+        // 策略 1：分屏查找 (Split Screen) - 针对资料分析/篇章阅读
+        // 使用 closest 查找最近的分屏容器，确保不会跨越到外层的其他题目模块
+        const splitWrapper = tiContainer.closest('.resizable-container');
+        
+        if (splitWrapper) {
+            // 确保当前题目确实位于该分屏容器的右侧区域
+            const rightPane = splitWrapper.querySelector('.right, .right-part');
+            if (rightPane && rightPane.contains(tiContainer)) {
+                // 定位左侧区域
+                const leftPane = splitWrapper.querySelector('.left, .left-part');
+                if (leftPane) {
+                    // 尝试查找标准的材料容器
+                    materialsContainer = leftPane.querySelector('app-materials .material-body') || 
+                                         leftPane.querySelector('.material-body') || 
+                                         leftPane.querySelector('.material-content') ||
+                                         leftPane.querySelector('app-materials');
+                    
+                    // 兜底策略：如果没找到标准容器，但左侧有内容 (例如单张图片)，则直接使用 leftPane
+                    // 这修复了部分资料分析题只有一张裸图导致报错的问题
+                    if (!materialsContainer && (leftPane.querySelector('img') || leftPane.innerText.trim().length > 10)) {
+                         materialsContainer = leftPane;
+                    }
+                }
+            }
+        }
+
+        // 策略 2：本地查找 (Local Search) - 针对普通列表题目
+        // 只有在分屏查找失败时才执行，且严格限制查找范围，防止抓到邻居的材料
         if (!materialsContainer) {
              let parent = tiContainer.parentElement;
-             // 向上查找最多3层，避免跨越太远
-             for (let i = 0; i < 3 && parent && parent.tagName !== 'BODY'; i++) {
-                 // 查找当前层级下的所有 material-body
-                 const candidates = Array.from(parent.querySelectorAll('.material-body'));
-                 
-                 for (const cand of candidates) {
-                     // 1. 如果材料属于另一个题目 (ti-container)，直接忽略
+             // 仅向上查找 4 层，避免查找到全局容器
+             for (let i = 0; i < 4 && parent && parent.tagName !== 'BODY'; i++) {
+                 // 如果遇到了明显的题目分组边界，停止查找
+                 if (parent.classList.contains('ti-group') || parent.classList.contains('paper-body') || parent.classList.contains('activity-body')) break;
+
+                 const cand = parent.querySelector('.material-body, .material-content, app-materials');
+                 if (cand) {
+                     // 1. 归属权校验：材料不能属于其他题目容器 (基本检查)
                      const owner = cand.closest('.ti-container, .solution-choice-container');
-                     if (owner && owner !== tiContainer && !owner.contains(tiContainer)) {
-                         continue;
+                     if (owner && owner !== tiContainer && !owner.contains(tiContainer)) continue;
+
+                     // 2. 分屏隔离检查 (关键修复)
+                     // 如果找到的这个材料其实是位于某个分屏容器内的（比如隔壁的资料分析模块），
+                     // 那么当前题目必须也位于同一个分屏容器内。如果当前题目在外面，说明抓错了。
+                     const splitParent = cand.closest('.resizable-container');
+                     if (splitParent) {
+                         // 材料在分屏里，但题目不在该分屏里 -> 忽略
+                         if (!splitParent.contains(tiContainer)) continue;
                      }
 
-                     // 2. 如果材料和当前题目在视觉上是分离的（中间隔了其他题目），也忽略
-                     // 这里简单判断：只要不属于别人，且是 parent 的后代，就认为是共享材料或自有材料
                      materialsContainer = cand;
-                     break; 
+                     break;
                  }
-                 if (materialsContainer) break;
                  parent = parent.parentElement;
              }
         }
@@ -311,32 +346,42 @@
         if (materialsContainer) {
             const cloneMat = materialsContainer.cloneNode(true);
             cloneMat.querySelectorAll('.tooltip-container, .tooltip-mask, .expand-btn').forEach(el => el.remove());
+            
+            // 提取图片（放入数组，供AI识别）
             cloneMat.querySelectorAll('img').forEach(img => {
-                if (img.src) { if (!images.includes(img.src)) images.push(img.src); img.style.maxWidth = '100%'; }
+                if (img.src) {
+                    img.style.maxWidth = '100%';
+                    if (!images.includes(img.src)) images.push(img.src);
+                }
             });
+            
+            // 优化表格样式
+            cloneMat.querySelectorAll('table').forEach(tbl => {
+                tbl.style.borderCollapse = 'collapse';
+                tbl.style.width = '100%';
+                tbl.querySelectorAll('td, th').forEach(cell => {
+                    cell.style.border = '1px solid #e2e8f0';
+                    cell.style.padding = '8px';
+                });
+            });
+
+            // 总是提取富文本材料，确保资料分析等依赖 HTML 结构的题型能正常显示
             materialText = cloneMat.innerHTML.trim();
         }
 
-        // --- 修复：增强的解析提取逻辑 (适配提供的 HTML 结构) ---
+        // --- 增强的解析提取逻辑 ---
         let analysisHtml = "";
-        // 优先尝试 ID 选择器，因为 HTML 中显示有 id="section-solution-..."
         let solutionContainer = null;
         
-        // 1. 尝试在 tiContainer 内部找 [id^="section-solution-"] .content
+        // 1. 尝试 ID 选择器
         const solutionSection = tiContainer.querySelector('[id^="section-solution-"]');
         if (solutionSection) {
             solutionContainer = solutionSection.querySelector('.content');
         }
         
-        // 2. 如果没找到，尝试常规类名
+        // 2. 尝试常规类名
         if (!solutionContainer) {
-             const selectors = [
-                '.solution-content', 
-                '.solution-body', 
-                '.analysis-body', 
-                '.app-solution-content',
-                '.material-analysis'
-            ];
+             const selectors = ['.solution-content', '.solution-body', '.analysis-body', '.app-solution-content', '.material-analysis'];
             for (const sel of selectors) {
                 const el = tiContainer.querySelector(sel);
                 if (el && el.innerText.trim().length > 5) {
@@ -346,7 +391,7 @@
             }
         }
         
-        // 3. 暴力查找：如果还没找到，找所有 section，看 title 是否包含 "解析"
+        // 3. 暴力查找
         if (!solutionContainer) {
             const sections = tiContainer.querySelectorAll('section');
             for (const sec of sections) {
@@ -374,25 +419,18 @@
         window.addEventListener('mouseup', () => { isResizing = false; });
     }
 
-    // --- 修复：打字机特效 ---
+    // --- 打字机特效 ---
     async function typewriterEffect(container, text) {
-        // 先清空，显示光标
         container.innerHTML = '<span class="cursor"></span>';
-        
         const chunkSize = 2; 
         const len = text.length;
         let currentText = '';
-        
         for (let i = 0; i < len; i += chunkSize) {
             currentText += text.substring(i, i + chunkSize);
-            // 实时解析 Markdown 并追加光标
             container.innerHTML = parseMarkdown(currentText) + '<span class="cursor"></span>';
             container.scrollTop = container.scrollHeight;
-            // 稍快的打字速度 (15ms)
             await new Promise(r => setTimeout(r, 15));
         }
-        
-        // 移除光标
         const cursor = container.querySelector('.cursor');
         if (cursor) cursor.remove();
     }
@@ -407,25 +445,10 @@
             <div class="fb-resize-handle" id="fb-resize-sw"></div>
         `;
         document.body.appendChild(globalPanel);
-        
-        // 面板内显隐逻辑
-        const hidePanel = () => { 
-            globalPanel.classList.remove('active'); 
-            globalPanel.style.pointerEvents = 'none'; 
-            currentActiveContainer = null; 
-        };
-        
+        const hidePanel = () => { globalPanel.classList.remove('active'); globalPanel.style.pointerEvents = 'none'; currentActiveContainer = null; };
         globalPanel.querySelector('#fb-panel-close').onclick = hidePanel;
-        
-        // 鼠标移出面板自动隐藏逻辑 (增加延时)
-        globalPanel.addEventListener('mouseenter', () => {
-            clearTimeout(autoCloseTimer);
-        });
-        globalPanel.addEventListener('mouseleave', () => {
-            // 800ms 延迟，给用户足够时间移动
-            autoCloseTimer = setTimeout(hidePanel, 800); 
-        });
-
+        globalPanel.addEventListener('mouseenter', () => { clearTimeout(autoCloseTimer); });
+        globalPanel.addEventListener('mouseleave', () => { autoCloseTimer = setTimeout(hidePanel, 800); });
         makeResizable(globalPanel, globalPanel.querySelector('#fb-resize-sw'));
         return globalPanel;
     }
@@ -438,8 +461,6 @@
         const userAnswer = qDataRaw ? qDataRaw.userAnswer : -1;
         const correctAnswer = qDataRaw ? qDataRaw.correctAnswer : -1;
         const wrongOptionChar = (userAnswer !== -1 && userAnswer !== correctAnswer) ? String.fromCharCode(65 + userAnswer) : 'A';
-        
-        // 确保 chatHistory 初始化 (空数组)
         if (!data.chatHistory) data.chatHistory = [];
 
         const suggestions = [
@@ -509,7 +530,6 @@
             }
         });
 
-        // 气泡点击事件
         const chatInput = body.querySelector('#chat-input');
         const suggestionsDiv = body.querySelector('.fb-suggestions');
         suggestionsDiv.addEventListener('click', (e) => {
@@ -535,7 +555,6 @@
 
         const chatMsgs = body.querySelector('#chat-msgs');
         
-        // 渲染历史消息 (直接显示)
         const renderHistory = () => {
             chatMsgs.innerHTML = '';
             data.chatHistory.forEach(msg => {
@@ -552,7 +571,6 @@
             const msg = chatInput.value.trim();
             if (!msg) return;
             
-            // 1. 显示用户消息
             data.chatHistory.push({ role: 'user', content: msg });
             const userDiv = document.createElement('div');
             userDiv.className = 'fb-chat-msg user';
@@ -561,7 +579,6 @@
             chatInput.value = '';
             chatMsgs.scrollTop = chatMsgs.scrollHeight;
 
-            // 2. 显示“思考中”状态 (Waiting Effect)
             const aiDiv = document.createElement('div');
             aiDiv.className = 'fb-chat-msg ai';
             aiDiv.innerHTML = '<span class="thinking-dots" style="color:#94a3b8;font-size:12px;">AI思考中</span>';
@@ -578,7 +595,6 @@
                 
                 if (res.reply) {
                     data.chatHistory.push({ role: 'assistant', content: res.reply });
-                    // 3. 拿到结果后，清空“思考中”，开始打字机输出
                     await typewriterEffect(aiDiv, res.reply);
                 }
             } catch (e) {
@@ -591,21 +607,30 @@
 
         body.querySelector('#save-btn').onclick = async () => {
             const btn = body.querySelector('#save-btn'); btn.disabled = true; btn.innerHTML = '<span class="fb-loader"></span> 保存中...';
-            
-            // Yield to UI
             await new Promise(r => setTimeout(r, 50));
 
             try {
-                // 保存时刻重新抓取解析，以防页面动态加载
                 const latestQData = getQuestionData(currentActiveContainer);
                 const finalAnalysis = latestQData.analysisHtml || qDataRaw.analysisHtml || '';
                 const finalNote = userNote.innerHTML;
+
+                // --- 保存时的优化策略 ---
+                // 1. 如果AI判断是资料分析，我们优先使用 Rich Text 材料，并清空原始附件数组，避免重复。
+                let materialsToSave = qDataRaw.materials;
+                if (aiResult.category === '资料分析') {
+                    materialsToSave = [];
+                }
+                
+                // 2. 如果是非资料分析，通常只有图片是重要的。
+                // 此时保留 materials 数组。如果 Rich Text 里只有一张图，App 端可能会显示两遍，但为了保险起见，
+                // 对于非资料分析题，我们不强行清除 materials，以防深度抓取逻辑遗漏了某些图。
 
                 await callBackend('save', {
                     id: Date.now().toString(),
                     createdAt: Date.now(),
                     stem: qDataRaw.stem, options: qDataRaw.options, 
-                    materials: qDataRaw.materials, materialText: qDataRaw.materialText,
+                    materials: materialsToSave, 
+                    materialText: qDataRaw.materialText,
                     correctAnswer: qDataRaw.correctAnswer, accuracy: qDataRaw.accuracy,
                     category: aiResult.category, subCategory: aiResult.subCategory, tags: aiResult.tags,
                     noteText: finalNote, 
@@ -624,7 +649,6 @@
         const qData = getQuestionData(tiContainer);
         if (!qData) { alert("无法获取题目数据"); return; }
         
-        // 检查缓存 (实现数据复用)
         if (fbPanelCache.has(tiContainer)) {
             if (!isBatch) { 
                 const cachedData = fbPanelCache.get(tiContainer);
@@ -636,11 +660,7 @@
         }
 
         let allBase64Materials = qData.materials || [];
-        if (qData.materialText && /<img/i.test(qData.materialText)) { qData.materials = []; }
-
         btn.innerHTML = '<span class="fb-loader"></span> 识别中';
-        
-        // Yield to UI
         await new Promise(r => setTimeout(r, 50));
 
         try {
@@ -657,7 +677,7 @@
                 const cacheData = { 
                     stem: qData.stem, 
                     aiResult: aiResult, 
-                    chatHistory: [], // 将在 renderPanelContent 中初始化默认开场白
+                    chatHistory: [],
                     userNoteValue: '', 
                     qData: qData 
                 };
@@ -680,13 +700,11 @@
         const btnLi = document.createElement('li'); btnLi.className = 'fb-plugin-btn-li';
         const btn = document.createElement('button'); btn.className = 'fb-plugin-btn'; btn.innerHTML = '<span>⚡</span>&nbsp;AI识别';
         
-        // 点击逻辑：开始分析
         btn.addEventListener('click', (e) => { 
             e.preventDefault(); e.stopPropagation(); 
             startAnalysis(tiContainer, btn); 
         }, true);
 
-        // --- 修复：悬停显隐逻辑 (800ms 延迟) ---
         btn.addEventListener('mouseenter', () => {
             if (fbPanelCache.has(tiContainer)) {
                 clearTimeout(autoCloseTimer);
